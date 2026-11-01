@@ -380,7 +380,11 @@ async function submissionsView(host, t, body) {
   const pcts = graded.map(s => s.auto.total ? s.auto.score / s.auto.total * 100 : 0);
   const avg = pcts.length ? pcts.reduce((a, b) => a + b, 0) / pcts.length : 0;
 
+  const noKey = !key || !key.questions || !Object.keys(key.questions).length;
   host.innerHTML = `<h2>Submissions — ${esc(t.title)}</h2>
+    ${noKey ? `<div class="warn"><b>⚠ The answer key for this test is missing, so answers can't be marked.</b><br>
+      Fix: go to <b>Tests → Upload a test file</b> and upload this test's .json file again (same file). The students' answers are kept,
+      and the marks will appear here straight away. Then press <b>Save scores only</b> (or Publish) again.</div>` : ""}
     <div class="btn-row">
       <button class="btn-primary" id="rel">${t.released ? "Hide results from students" : "📢 Publish results to students"}</button>
       <button id="save">Save scores only</button>

@@ -21,16 +21,33 @@ function deepMerge(target, src) {
   }
   return target;
 }
+// Firestore can't store a list inside a list (e.g. fill-in answers [["void"],["String"]]),
+// so such lists are saved as text and turned back into lists when read.
+const hasNested = a => a.some(Array.isArray);
+function packNested(obj) {
+  if (Array.isArray(obj)) return hasNested(obj) ? { __json: JSON.stringify(obj) } : obj.map(packNested);
+  if (obj && typeof obj === "object" && !(INC in obj)) { const o = {}; for (const k in obj) o[k] = packNested(obj[k]); return o; }
+  return obj;
+}
+function unpackNested(v) {
+  if (Array.isArray(v)) return v.map(unpackNested);
+  if (v && typeof v === "object") {
+    if (typeof v.__json === "string" && Object.keys(v).length === 1) { try { return JSON.parse(v.__json); } catch { return v; } }
+    const o = {}; for (const k in v) o[k] = unpackNested(v[k]); return o;
+  }
+  return v;
+}
 function toFs(obj) { // convert inc() markers + timestamps for Firestore
   if (obj && typeof obj === "object" && INC in obj) return fb.F.increment(obj[INC]);
   if (obj === "__now__") return fb.F.serverTimestamp();
-  if (Array.isArray(obj)) return obj.map(toFs);
+  if (Array.isArray(obj)) { if (hasNested(obj)) return { __json: JSON.stringify(obj) }; return obj.map(toFs); }
   if (obj && typeof obj === "object") { const o = {}; for (const k in obj) o[k] = toFs(obj[k]); return o; }
   return obj;
 }
 function fromFs(v) {
   if (v && typeof v.toDate === "function") return v.toDate().toISOString();
   if (Array.isArray(v)) return v.map(fromFs);
+  if (v && typeof v === "object" && typeof v.__json === "string" && Object.keys(v).length === 1) { try { return JSON.parse(v.__json); } catch { return v; } }
   if (v && typeof v === "object") { const o = {}; for (const k in v) o[k] = fromFs(v[k]); return o; }
   return v;
 }
@@ -43,7 +60,7 @@ const local = {
 
 const db = {
   async get(coll, id) {
-    if (DEV) { const d = local.load(); return d[coll]?.[id] ? { id, ...d[coll][id] } : null; }
+    if (DEV) { const d = local.load(); return d[coll]?.[id] ? { id, ...unpackNested(d[coll][id]) } : null; }
     const s = await fb.F.getDoc(fb.F.doc(fb.db, coll, id));
     return s.exists() ? { id: s.id, ...fromFs(s.data()) } : null;
   },
@@ -51,7 +68,9 @@ const db = {
     if (DEV) {
       const d = local.load(); d[coll] = d[coll] || {};
       if (d[coll][id] && !merge && coll === "submissions") throw new Error("permission-denied: already submitted");
-      d[coll][id] = merge ? deepMerge(d[coll][id] || {}, local.fix(data)) : local.fix(data);
+      const packed = packNested(data);
+      (function check(x) { if (Array.isArray(x)) { if (hasNested(x)) throw new Error("Nested arrays are not supported"); x.forEach(check); } else if (x && typeof x === "object") Object.values(x).forEach(check); })(packed);
+      d[coll][id] = merge ? deepMerge(d[coll][id] || {}, local.fix(packed)) : local.fix(packed);
       return local.save(d);
     }
     return fb.F.setDoc(fb.F.doc(fb.db, coll, id), toFs(data), { merge });
@@ -63,7 +82,7 @@ const db = {
   async query(coll, filters = []) {
     if (DEV) {
       const d = local.load()[coll] || {};
-      return Object.entries(d).map(([id, v]) => ({ id, ...v })).filter(r => filters.every(([f, , val]) => r[f] === val));
+      return Object.entries(d).map(([id, v]) => ({ id, ...unpackNested(v) })).filter(r => filters.every(([f, , val]) => r[f] === val));
     }
     const q = fb.F.query(fb.F.collection(fb.db, coll), ...filters.map(([f, op, v]) => fb.F.where(f, op, v)));
     const snap = await fb.F.getDocs(q);
@@ -171,7 +190,11 @@ export function submitTest(testId, data) {
 // ---------- faculty ----------
 export const listTests = () => db.query("tests");
 export const getKey = id => db.get("testKeys", id);
-export const saveTest = (id, pub, key) => Promise.all([db.set("tests", id, pub, false), db.set("testKeys", id, key, false)]);
+// The answer key is saved first, so a test never appears without its key.
+export async function saveTest(id, pub, key) {
+  await db.set("testKeys", id, key, false);
+  await db.set("tests", id, pub, false);
+}
 export const updateTest = (id, fields) => db.set("tests", id, fields);
 export const listSubmissions = testId => db.query("submissions", [["testId", "==", testId]]);
 export const updateSubmission = (id, fields) => db.set("submissions", id, fields);
