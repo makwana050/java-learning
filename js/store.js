@@ -216,6 +216,19 @@ export async function loadSettings() {
 export const saveSettings = fields => db.set("settings", "public", { ...fields, updatedAt: "__now__" }).then(loadSettings);
 
 // ---------- live exam status (student writes, faculty reads) ----------
+// An exam in progress is also kept online (in the student's own progress record),
+// so it continues on another browser or computer after a crash, power cut or closed laptop.
+const examKey = k => k.replace(/[^\w-]/g, "_");
+export async function loadExamState(k) {
+  try { const d = await db.get("progress", store.user.uid); return d?.exams?.[examKey(k)] || null; } catch { return null; }
+}
+export function saveExamState(k, state) {
+  return db.set("progress", store.user.uid, { exams: { [examKey(k)]: state } }).catch(() => {});
+}
+export function clearExamState(k) {
+  return db.set("progress", store.user.uid, { exams: { [examKey(k)]: null } }).catch(() => {});
+}
+
 export function setLive(testId, data) {
   return db.set("live", `${testId}_${store.user.uid}`, {
     ...data, testId, uid: store.user.uid, name: store.user.displayName || "", email: store.user.email || "", updatedAt: "__now__",

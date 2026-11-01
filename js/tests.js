@@ -1,6 +1,6 @@
 // Student side of tests: list, take (with integrity rules), submit, see published results
 import { esc, el, toast, fillTemplateHTML, pickQuestions, textCanvas, htmlToText } from "./ui.js";
-import { store, listOpenTests, getTest, mySubmissions, submitTest, setLive } from "./store.js";
+import { store, listOpenTests, getTest, mySubmissions, submitTest, setLive, loadExamState, saveExamState, clearExamState } from "./store.js";
 import { runJava, warmUp, primeCompiler } from "./runner.js";
 import { createEditor } from "./editor.js";
 import { phaseText } from "./topic.js";
@@ -61,10 +61,17 @@ export async function renderTakeTest(app, id) {
   if (t.endsAt && Date.now() > new Date(t.endsAt).getTime()) { app.innerHTML = `<div class="page"><div class="warn">Time for this test is over. <a href="#/tests">Back to tests</a></div></div>`; return; }
 
   const k = `test:${id}:${store.user.uid}:${t.startedAt || ""}`;
-  const saved = JSON.parse(localStorage.getItem(k) || "null");
+  let saved = JSON.parse(localStorage.getItem(k) || "null");
+  let how = "page reloaded / re-opened";
+  if (!saved?.startedAt) {
+    // not in this browser: maybe the student started on another browser/computer (crash, power cut…)
+    app.innerHTML = `<div class="page"><p class="muted">Loading…</p></div>`;
+    const remote = await loadExamState(k);
+    if (remote?.startedAt) { saved = remote; how = "continued on another browser or computer"; localStorage.setItem(k, JSON.stringify(saved)); }
+  }
   if (!saved?.startedAt) return renderStart(app, t, k);
   saved.events = saved.events || [];
-  saved.events.push({ at: Math.round((Date.now() - saved.startedAt) / 1000), type: "page reloaded / re-opened" });
+  saved.events.push({ at: Math.round((Date.now() - saved.startedAt) / 1000), type: how });
   renderPaper(app, t, k, saved);
 }
 
@@ -100,12 +107,20 @@ function renderStart(app, t, k) {
     const { ids, optionOrder } = pickQuestions(t, store.user.uid);
     const s = { startedAt: Date.now(), roll, answers: {}, picked: ids, optionOrder, cur: 0, qEnds: null, timeSpent: {}, tabSwitches: 0, pasteBlocked: 0, events: [] };
     localStorage.setItem(k, JSON.stringify(s));
+    saveExamState(k, s);
     renderPaper(app, t, k, s);
   };
 }
 
 function renderPaper(app, t, k, state) {
-  const save = () => localStorage.setItem(k, JSON.stringify(state));
+  // saved in this browser at once, and online every few seconds (and when the page is closed)
+  let remoteTimer = null;
+  const saveRemote = () => { clearTimeout(remoteTimer); remoteTimer = null; saveExamState(k, state); };
+  const save = () => {
+    localStorage.setItem(k, JSON.stringify(state));
+    if (!remoteTimer) remoteTimer = setTimeout(saveRemote, 3000);
+  };
+  window.addEventListener("pagehide", () => { if (remoteTimer) saveRemote(); }, { once: true });
   const editors = {};
   const byId = Object.fromEntries(t.questions.map(q => [q.id, q]));
   const qs = (state.picked || t.questions.map(q => q.id)).map(id => byId[id]).filter(Boolean);
@@ -324,6 +339,7 @@ function renderPaper(app, t, k, state) {
         startedAt: new Date(state.startedAt).toISOString(), autoSubmit: !!auto, autoReason: reason || "",
       });
       localStorage.removeItem(k);
+      clearTimeout(remoteTimer); remoteTimer = null; clearExamState(k);
       setLive(t.id, { roll: state.roll, n: qs.length, leaves: state.tabSwitches || 0, status: "submitted", away: false, last: reason ? "auto-submitted: " + reason : auto ? "auto-submitted (time up)" : "submitted" });
       stopExam();
       app.innerHTML = `<div class="page" style="max-width:640px"><div class="card"><h1>✓ Submitted</h1>
