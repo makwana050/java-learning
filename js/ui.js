@@ -89,7 +89,9 @@ export function shuffle(arr, rnd) {
 
 // The questions (and option order) a given student gets — same result every time for the same student and test run.
 export function pickQuestions(t, uid) {
-  const rnd = seededRandom(uid + "|" + t.id + "|" + (t.startedAt || ""));
+  // a student whose response was deleted (to re-appear) gets a fresh question set each time
+  const retake = (t.retakes && t.retakes[uid]) || 0;
+  const rnd = seededRandom(uid + "|" + t.id + "|" + (t.startedAt || "") + (retake ? "|retake" + retake : ""));
   let ids = t.questions.map(q => q.id);
   if (t.shuffle !== false || t.pick) ids = shuffle(ids, rnd);
   if (t.pick) ids = ids.slice(0, t.pick);

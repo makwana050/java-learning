@@ -60,7 +60,8 @@ export async function renderTakeTest(app, id) {
   if (!t || !t.open) { app.innerHTML = `<div class="page"><div class="warn">This test is not live. <a href="#/tests">Back to tests</a></div></div>`; return; }
   if (t.endsAt && Date.now() > new Date(t.endsAt).getTime()) { app.innerHTML = `<div class="page"><div class="warn">Time for this test is over. <a href="#/tests">Back to tests</a></div></div>`; return; }
 
-  const k = `test:${id}:${store.user.uid}:${t.startedAt || ""}`;
+  const retake = (t.retakes && t.retakes[store.user.uid]) || 0;
+  const k = `test:${id}:${store.user.uid}:${t.startedAt || ""}${retake ? ":r" + retake : ""}`;
   let saved = JSON.parse(localStorage.getItem(k) || "null");
   let how = "page reloaded / re-opened";
   if (!saved?.startedAt) {

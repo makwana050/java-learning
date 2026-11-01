@@ -370,6 +370,15 @@ function gradeSubmission(t, key, s) {
   return { per, raw, penalty, score: final, total, flags, review };
 }
 
+// Deletes a student's response so they can take the test again (with a fresh question set).
+async function deleteResponse(t, s) {
+  await deleteSubmission(s.id);
+  await clearLive(t.id, s.uid);
+  const n = ((t.retakes && t.retakes[s.uid]) || 0) + 1;
+  await updateTest(t.id, { retakes: { [s.uid]: n } });
+  t.retakes = { ...(t.retakes || {}), [s.uid]: n };
+}
+
 async function submissionsView(host, t, body) {
   clearInterval(liveTimer);
   host.innerHTML = `<p class="muted">Loading submissions…</p>`;
@@ -410,7 +419,8 @@ async function submissionsView(host, t, body) {
         <td class="num"><b>${s.auto.score}</b> / ${s.auto.total}</td>
         <td class="num">${s.auto.total ? Math.round(s.auto.score / s.auto.total * 100) : 0}</td>
         <td class="small" style="color:var(--bad)">${esc(s.auto.flags.filter(f => !/left the page|tried to paste/.test(f)).join(" | "))}</td>
-        <td><button class="small view" data-i="${i}">View / adjust</button></td></tr>`).join("") || `<tr><td colspan="11" class="muted">No submissions yet.</td></tr>`}
+        <td style="white-space:nowrap"><button class="small view" data-i="${i}">View / adjust</button>
+          <button class="small del-resp" data-i="${i}" title="Delete this response so the student can take the test again" style="color:var(--bad)">🗑 Delete</button></td></tr>`).join("") || `<tr><td colspan="11" class="muted">No submissions yet.</td></tr>`}
     </tbody></table></div>
     <div id="detail"></div>
     ${graded.length ? analysisHTML(t, key, graded) : ""}`;
@@ -432,6 +442,14 @@ async function submissionsView(host, t, body) {
     ...graded.map(s => [s.roll, s.name, s.email, s.submittedAt, s.auto.raw, s.auto.penalty, s.adjust || 0, s.auto.score, s.auto.total, s.auto.total ? Math.round(s.auto.score / s.auto.total * 100) : 0,
       s.tabSwitches || 0, s.pasteBlocked || 0, ...t.questions.map(q => s.auto.per[q.id] ?? ""), s.auto.flags.join(" | "), s.adjustNote || ""]),
   ]);
+  host.querySelectorAll(".del-resp").forEach(b => b.onclick = async () => {
+    const s = graded[+b.dataset.i];
+    if (!confirm(`Delete the response of ${s.name || s.email} (roll ${s.roll || "–"})?\n\nTheir answers and marks for "${t.title}" will be removed, and they can take the test again with a new set of questions.\nThe test must be live (▶ Start now) for them to retake it.\n\nTip: download the CSV first if you want to keep a record.`)) return;
+    b.disabled = true;
+    await deleteResponse(t, s);
+    toast(`Deleted. ${s.name || "The student"} can take the test again${t.open ? " now" : " when you start it"}.`);
+    submissionsView(host, t, body);
+  });
   host.querySelectorAll(".view").forEach(b => b.onclick = () => showDetail(host.querySelector("#detail"), t, graded[+b.dataset.i], () => submissionsView(host, t, body)));
   if (codeQs.length) {
     host.querySelector("#zip").onclick = () => {
@@ -497,7 +515,7 @@ function showDetail(host, t, s, refresh) {
       <p class="small muted">You can also change the marks of single questions below (useful for partial credit on code).</p>
       <div class="btn-row">
         <button class="btn-primary" id="d-save">Save adjustments</button>
-        <button id="d-reattempt" style="color:var(--bad)">↺ Allow re-attempt (delete this submission)</button>
+        <button id="d-reattempt" style="color:var(--bad)">🗑 Delete response (student can re-appear)</button>
       </div>
     </div>
 
@@ -523,10 +541,9 @@ function showDetail(host, t, s, refresh) {
     refresh();
   };
   host.querySelector("#d-reattempt").onclick = async () => {
-    if (!confirm(`Delete ${s.name}'s submission so they can take "${t.title}" again?\nTheir current answers will be lost (download the CSV first if you need them).\nThe test must be live for them to retake it.`)) return;
-    await deleteSubmission(s.id);
-    await clearLive(t.id, s.uid);
-    toast("Submission deleted — the student can start the test again while it is live.");
+    if (!confirm(`Delete ${s.name}'s submission so they can take "${t.title}" again?\nTheir current answers will be lost (download the CSV first if you need them).\nThey get a new set of questions. The test must be live for them to retake it.`)) return;
+    await deleteResponse(t, s);
+    toast("Response deleted. The student can take the test again (with a new set of questions) while it is live.");
     refresh();
   };
 }
