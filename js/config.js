@@ -16,10 +16,12 @@ export const firebaseConfig = {
 // If you add an email here, add it in firestore.rules too.
 export const FACULTY_EMAILS = ["mak005500@gmail.com"];
 
-// Only Google accounts from this domain can use the site (unless the faculty
+// Only Google accounts from these domains can use the site (unless the faculty
 // dashboard's Access tab is switched to "only listed emails").
-// If you change it, change it in firestore.rules too.
-export const ALLOWED_DOMAIN = "rru.ac.in";
+// If you change them, change the domainOk() line in firestore.rules too.
+export const ALLOWED_DOMAINS = ["rru.ac.in", "student.rru.ac.in"];
+export const ALLOWED_DOMAIN = ALLOWED_DOMAINS.join(" or @");   // shown on screen: "rru.ac.in or @student.rru.ac.in"
+export const domainAllowed = email => ALLOWED_DOMAINS.some(d => (email || "").toLowerCase().endsWith("@" + d));
 
 export const SITE_TITLE = "Java Lab";
 

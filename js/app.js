@@ -42,7 +42,7 @@ function renderLogin() {
     <p class="muted">Learn Core Java by reading, running and writing real code — right in your browser.</p>
     <button class="btn-primary" id="signin" style="font-size:1rem;padding:.7rem 1.4rem;margin-top:1rem">Sign in with Google</button>
     <p class="small muted" style="margin-top:1.4rem">Sign in with your <b>@${esc(ALLOWED_DOMAIN)}</b> Google account. Your practice progress is saved to it, so you can continue on any computer.</p>
-    <p class="small" id="err" style="color:var(--bad)">${store.deniedEmail ? `Access denied for <b>${esc(store.deniedEmail)}</b>. This site is only for authorised ${esc(ALLOWED_DOMAIN)} accounts — please sign in with your college email, or ask your faculty to add you.` : ""}</p>
+    <p class="small" id="err" style="color:var(--bad)">${store.deniedEmail ? `Access denied for <b>${esc(store.deniedEmail)}</b>. This site is only for authorised @${esc(ALLOWED_DOMAIN)} accounts — please sign in with your college email, or ask your faculty to add you.` : ""}</p>
   </div></div>`;
   document.getElementById("signin").onclick = () => signIn().catch(e => {
     document.getElementById("err").textContent = e.code === "auth/unauthorized-domain"

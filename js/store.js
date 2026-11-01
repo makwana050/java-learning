@@ -1,5 +1,5 @@
 // Login + database (Firebase). Also a local mock used only for offline testing (?dev=1 on localhost).
-import { firebaseConfig, FACULTY_EMAILS, ALLOWED_DOMAIN, RUN_SERVER } from "./config.js";
+import { firebaseConfig, FACULTY_EMAILS, RUN_SERVER, domainAllowed } from "./config.js";
 import { setRunServer, pingServer } from "./runner.js";
 
 const FB = "https://www.gstatic.com/firebasejs/10.12.2/";
@@ -114,7 +114,7 @@ export async function initAuth(onChange) {
     if (u && !store.isFaculty) {
       // Quick check for the wrong domain; the database rules make the final decision
       // (they also enforce the "only listed emails" mode).
-      const domainOk = (u.email || "").toLowerCase().endsWith("@" + ALLOWED_DOMAIN);
+      const domainOk = domainAllowed(u.email);
       let denied = !domainOk && !(await probeAccess());
       if (!denied) {
         try { await loadProgress(); }
@@ -148,7 +148,7 @@ export function isAllowed(email, access) {
   email = (email || "").toLowerCase();
   const listed = (access?.emails || []).includes(email);
   if (access?.mode === "list") return listed;
-  return email.endsWith("@" + ALLOWED_DOMAIN) || listed;
+  return domainAllowed(email) || listed;
 }
 async function probeAccess() {
   try { await db.get("progress", store.user.uid); return true; }
