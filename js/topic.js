@@ -1,6 +1,6 @@
 // Topic page: concept, syntax breakdown, examples, practice, fill-in-the-syntax, quick check
 import { esc, el, highlightJava, guardCopy, toast, normBlank, fillTemplateHTML } from "./ui.js";
-import { runJava, warmUp, outputsMatch, firstDiffLine, normalizeOutput, codeOnly, missingMust } from "./runner.js";
+import { runJava, warmUp, primeCompiler, outputsMatch, firstDiffLine, normalizeOutput, codeOnly, missingMust } from "./runner.js";
 import { createEditor } from "./editor.js";
 import { store, track, trackTime, inc } from "./store.js";
 
@@ -52,7 +52,7 @@ export function renderTopic(root, topic, data, chapter, prev, next) {
   if (data.quiz?.length) root.querySelector("#quiz-host").appendChild(quizCard(data.quiz, topic.id));
   guardCopy(root);
 
-  if (data.practice?.length || data.samples?.length) setTimeout(() => warmUp().catch(() => {}), 1500);
+  if (data.practice?.length || data.samples?.length) setTimeout(() => primeCompiler(), 1500);
   timeTimer = setInterval(() => { if (document.visibilityState === "visible") trackTime(topic.id, 30); }, 30000);
 }
 
@@ -91,7 +91,7 @@ function sampleCard(s, i) {
   };
   card.querySelector(".btn-run").onclick = async e => {
     const b = e.currentTarget; b.disabled = true;
-    const r = await runJava(s.code, ph => status.textContent = phaseText(ph));
+    const r = await runJava(s.code, (ph, s) => status.textContent = phaseText(ph, s));
     status.textContent = ""; b.disabled = false;
     area.innerHTML = `<div class="label">Output</div><pre class="outbox">${esc(r.output || "(no output)")}</pre>`;
     showExplain();
@@ -99,8 +99,15 @@ function sampleCard(s, i) {
   return card;
 }
 
-export function phaseText(ph) {
-  return { loading: "Starting Java… (first run can take 20–40 s)", compiling: "Compiling…", running: "Running…" }[ph] || "";
+export function phaseText(ph, sec = 0) {
+  const t = sec >= 3 ? ` ${sec} s` : "";
+  return ({
+    loading: "Starting Java…",
+    "compiling-first": "Preparing the Java compiler (first time only; can take up to a minute)…",
+    compiling: "Compiling…",
+    running: "Running…",
+    finishing: "Finishing the previous run…",
+  }[ph] || "") + t;
 }
 
 // ---------- practice ----------
@@ -169,7 +176,7 @@ function practiceCard(p, i, topicId) {
     localStorage.setItem(draftKey, code);
     const b = $(".do-run"); b.disabled = true;
     const status = $(".status"); status.className = "status run";
-    const r = await runJava(code, ph => status.textContent = phaseText(ph));
+    const r = await runJava(code, (ph, s) => status.textContent = phaseText(ph, s));
     b.disabled = false; status.textContent = "";
 
     const missing = missingMust(code, p.mustUse);

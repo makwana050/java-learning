@@ -1,7 +1,7 @@
 // Student side of tests: list, take (with integrity rules), submit, see published results
 import { esc, el, toast, fillTemplateHTML, pickQuestions, textCanvas, htmlToText } from "./ui.js";
 import { store, listOpenTests, getTest, mySubmissions, submitTest, setLive } from "./store.js";
-import { runJava, warmUp } from "./runner.js";
+import { runJava, warmUp, primeCompiler } from "./runner.js";
 import { createEditor } from "./editor.js";
 import { phaseText } from "./topic.js";
 import { reviewHTML } from "./faculty.js";
@@ -172,7 +172,7 @@ function renderPaper(app, t, k, state) {
         const b = e.currentTarget; b.disabled = true;
         const st = card.querySelector(".status");
         const code = ed.getValue();
-        const r = await runJava(code, ph => st.textContent = phaseText(ph));
+        const r = await runJava(code, (ph, s) => st.textContent = phaseText(ph, s));
         b.disabled = false; st.textContent = "";
         state.answers[q.id] = { code, output: r.output, status: r.status, runs: (state.answers[q.id]?.runs || 0) + 1 };
         save();
@@ -205,7 +205,7 @@ function renderPaper(app, t, k, state) {
       <span class="small muted">Answered questions can't be changed after you move on.</span>
       <button class="btn-primary" id="next">${last ? "Finish & submit" : "Save & next →"}</button></div>`;
     footer.querySelector("#next").onclick = () => next(false);
-    if (q.type === "code") warmUp().catch(() => {});
+    if (q.type === "code") primeCompiler();
   }
   function next(timedOut) {
     const q = qs[state.cur];
@@ -222,7 +222,7 @@ function renderPaper(app, t, k, state) {
     qs.forEach((q, i) => host.appendChild(buildCard(q, i)));
     footer.innerHTML = `<p>Check your answers, then submit. <b>You cannot change them after submitting.</b></p><button class="btn-primary" id="submit">Submit test</button>`;
     footer.querySelector("#submit").onclick = () => doSubmit(false, "confirm");
-    if (qs.some(q => q.type === "code")) warmUp().catch(() => {});
+    if (qs.some(q => q.type === "code")) primeCompiler();
   }
 
   // ---------- integrity guard ----------

@@ -255,7 +255,7 @@ export function renderBuilder(host, opts) {
       tbox.querySelector(".e-alt").oninput = e => { q.answer = [q.answer[0], ...e.target.value.split(/\n---\n/).filter(x => x.trim())]; };
       tbox.querySelector(".e-run").onclick = async ev => {
         const st = tbox.querySelector(".e-st"); ev.target.disabled = true;
-        const r = await runJava(q.code, ph => st.textContent = phaseTextSafe(ph));
+        const r = await runJava(q.code, (ph, s) => st.textContent = phaseTextSafe(ph, s));
         ev.target.disabled = false;
         if (r.status !== "ok") { st.className = "status bad e-st"; st.textContent = "Doesn't run: " + r.status; tbox.querySelector(".e-ans").value = r.output; return; }
         st.className = "status ok e-st"; st.textContent = "✓ Filled from the real output";
@@ -294,7 +294,7 @@ export function renderBuilder(host, opts) {
       tbox.querySelector(".e-must").oninput = e => { q.mustUse = e.target.value.split(",").map(s => s.trim()).filter(Boolean); };
       tbox.querySelector(".e-run").onclick = async ev => {
         const st = tbox.querySelector(".e-st"); ev.target.disabled = true;
-        const r = await runJava(q.solution || "", ph => st.textContent = phaseTextSafe(ph));
+        const r = await runJava(q.solution || "", (ph, s) => st.textContent = phaseTextSafe(ph, s));
         ev.target.disabled = false;
         if (r.status !== "ok") { st.className = "status bad e-st"; st.textContent = "Solution doesn't run: " + r.status; return; }
         st.className = "status ok e-st"; st.textContent = "✓ Expected output filled";

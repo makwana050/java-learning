@@ -3,13 +3,18 @@
 // Nothing is sent to any server.
 
 const CHEERPJ_LOADER = "https://cjrtnc.leaningtech.com/5.0/loader.js";
-const TIMEOUT_MS = 15000;
+const RUN_TIMEOUT_MS = 15000;          // a student's program (catches infinite loops)
+const FIRST_COMPILE_MS = 240000;       // first compile downloads the compiler (18 MB) — can be slow on college Wi-Fi
+const COMPILE_MS = 90000;              // later compiles are usually 1–5 s
 
 const params = new URLSearchParams(location.search);
 const DEV = params.has("dev") && ["localhost", "127.0.0.1"].includes(location.hostname);
 
 let readyPromise = null;
 let queue = Promise.resolve();
+let compilerWarm = false;   // true after the first successful compile in this page
+let busy = null;            // a CheerpJ call that is still running after we stopped waiting for it
+let primePromise = null;
 
 function loadScript(src) {
   return new Promise((res, rej) => {
@@ -31,6 +36,15 @@ export function warmUp() {
   return readyPromise;
 }
 
+// Starts Java AND compiles a tiny program in the background, so the compiler is
+// downloaded and ready before the student presses Run for the first time.
+export function primeCompiler() {
+  if (DEV || compilerWarm || primePromise) return primePromise || Promise.resolve();
+  primePromise = runJava("public class Warm { public static void main(String[] a) { } }", () => {}, { silent: true })
+    .catch(() => {}).finally(() => { primePromise = null; });
+  return primePromise;
+}
+
 // Finds the class name to use as the file name / main class.
 export function findMainClass(code) {
   const pub = code.match(/public\s+(?:final\s+|abstract\s+)*class\s+([A-Za-z_$][\w$]*)/);
@@ -43,24 +57,34 @@ function clean(text) {
   return (text || "").replace(/\/str\//g, "").replace(/\r\n/g, "\n");
 }
 
-function withTimeout(promise) {
+function withTimeout(promise, ms) {
   return Promise.race([
     promise,
-    new Promise(res => setTimeout(() => res("__timeout__"), TIMEOUT_MS)),
+    new Promise(res => setTimeout(() => res("__timeout__"), ms)),
   ]);
+}
+
+// Calls onPhase(phase, seconds) every second so the student sees it is still working.
+function ticker(onPhase, phase) {
+  const t0 = Date.now();
+  onPhase(phase, 0);
+  const id = setInterval(() => onPhase(phase, Math.round((Date.now() - t0) / 1000)), 1000);
+  return () => clearInterval(id);
 }
 
 /**
  * Compile and run a Java program.
  * Returns { status: "ok" | "compile" | "runtime" | "timeout" | "error", output }
  */
-export function runJava(code, onPhase = () => {}) {
-  const job = queue.then(() => doRun(code, onPhase));
+export function runJava(code, onPhase = () => {}, opts = {}) {
+  // If the compiler is still being prepared in the background, show that while this run waits.
+  const stopWait = primePromise && !opts.silent ? ticker(onPhase, "compiling-first") : null;
+  const job = queue.then(() => { if (stopWait) stopWait(); return doRun(code, onPhase, opts); });
   queue = job.catch(() => {});
   return job;
 }
 
-async function doRun(code, onPhase) {
+async function doRun(code, onPhase, opts = {}) {
   const cls = findMainClass(code);
   if (!cls) return { status: "compile", output: "error: no class found.\nEvery Java program needs a class, e.g.  public class Main { ... }" };
   if (!/static\s+void\s+main\s*\(/.test(code))
@@ -72,12 +96,21 @@ async function doRun(code, onPhase) {
     return r.json();
   }
 
+  // A previous compile that took too long may still be finishing: wait for it (it makes this one fast).
+  if (busy) {
+    const stop = ticker(onPhase, "finishing");
+    await busy.catch(() => {});
+    stop();
+  }
+
+  let stop = ticker(onPhase, "loading");
   try {
-    onPhase("loading");
     await warmUp();
   } catch (e) {
+    stop();
     return { status: "error", output: "Could not start Java in this browser. Check your internet connection and reload the page.\n(" + e.message + ")" };
   }
+  stop();
 
   const con = document.getElementById("console");
   const cp = "/app" + new URL("tools.jar", location.href).pathname + ":/files/";
@@ -85,18 +118,27 @@ async function doRun(code, onPhase) {
 
   con.textContent = "";
   window.cheerpjAddStringFile(src, code);
-  onPhase("compiling");
-  const exit = await withTimeout(window.cheerpjRunMain("com.sun.tools.javac.Main", cp, src, "-d", "/files/"));
-  if (exit === "__timeout__") return { status: "timeout", output: "Compiling took too long. Reload the page and try again." };
+  stop = ticker(onPhase, compilerWarm ? "compiling" : "compiling-first");
+  const compileP = window.cheerpjRunMain("com.sun.tools.javac.Main", cp, src, "-d", "/files/");
+  const exit = await withTimeout(compileP, compilerWarm ? COMPILE_MS : FIRST_COMPILE_MS);
+  stop();
+  if (exit === "__timeout__") {
+    busy = compileP.then(() => { compilerWarm = true; }).finally(() => { busy = null; });
+    return { status: "timeout", output: "Java is still getting ready (the internet seems slow).\nWait a few seconds and press Run again; it continues from where it stopped, so there's no need to reload the page." };
+  }
+  compilerWarm = true;
   const compileText = clean(con.textContent);
   if (exit !== 0) return { status: "compile", output: compileText || "Compilation failed." };
+  if (opts.silent) return { status: "ok", output: "" };
 
   con.textContent = "";
-  onPhase("running");
-  const rc = await withTimeout(window.cheerpjRunMain(cls, cp));
+  stop = ticker(onPhase, "running");
+  const runP = window.cheerpjRunMain(cls, cp);
+  const rc = await withTimeout(runP, RUN_TIMEOUT_MS);
+  stop();
   const out = clean(con.textContent);
   if (rc === "__timeout__")
-    return { status: "timeout", output: out + "\n⏱ Your program ran for more than 15 seconds — maybe an infinite loop? Reload the page to stop it." };
+    return { status: "timeout", output: out + "\n⏱ Your program ran for more than 15 seconds. Maybe an infinite loop? Reload the page to stop it." };
   return { status: rc === 0 ? "ok" : "runtime", output: out };
 }
 
