@@ -113,13 +113,18 @@ async function doRun(code, onPhase, opts = {}) {
   stop();
 
   const con = document.getElementById("console");
-  const cp = "/app" + new URL("tools.jar", location.href).pathname + ":/files/";
+  const jar = "/app" + new URL("tools.jar", location.href).pathname;
+  const cp = jar + ":/files/";   // to start the compiler
+  // javac options that make each compile much faster:
+  //  -cp /files/      : don't make javac search the 18 MB tools.jar for every class name
+  //  -proc:none       : don't scan for annotation processors
+  //  -implicit:none   : don't write extra class files
   const src = "/str/" + cls + ".java";
 
   con.textContent = "";
   window.cheerpjAddStringFile(src, code);
   stop = ticker(onPhase, compilerWarm ? "compiling" : "compiling-first");
-  const compileP = window.cheerpjRunMain("com.sun.tools.javac.Main", cp, src, "-d", "/files/");
+  const compileP = window.cheerpjRunMain("com.sun.tools.javac.Main", cp, "-proc:none", "-implicit:none", "-cp", "/files/", "-d", "/files/", src);
   const exit = await withTimeout(compileP, compilerWarm ? COMPILE_MS : FIRST_COMPILE_MS);
   stop();
   if (exit === "__timeout__") {
@@ -133,7 +138,7 @@ async function doRun(code, onPhase, opts = {}) {
 
   con.textContent = "";
   stop = ticker(onPhase, "running");
-  const runP = window.cheerpjRunMain(cls, cp);
+  const runP = window.cheerpjRunMain(cls, "/files/");   // the student's program needs only its own classes
   const rc = await withTimeout(runP, RUN_TIMEOUT_MS);
   stop();
   const out = clean(con.textContent);
