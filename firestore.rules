@@ -1,0 +1,80 @@
+rules_version = '2';
+// Paste this whole file into Firebase console → Firestore Database → Rules → Publish.
+// If you add another faculty email, add it to the list below AND to js/config.js.
+// If you change the college domain, change it below AND ALLOWED_DOMAIN in js/config.js.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function email() { return request.auth.token.email.lower(); }
+
+    function isFaculty() {
+      return signedIn()
+        && request.auth.token.email_verified == true
+        && email() in ['mak005500@gmail.com'];
+    }
+
+    // Access settings saved from the Faculty dashboard → Access tab.
+    // mode "domain": any @rru.ac.in account + listed emails; mode "list": only listed emails.
+    function accessDoc() { return /databases/$(database)/documents/config/access; }
+    function domainOk() { return email().matches('.*@rru[.]ac[.]in$'); }
+    function allowed() {
+      return isFaculty() || (
+        signedIn() && request.auth.token.email_verified == true && (
+          !exists(accessDoc())
+            ? domainOk()
+            : (email() in get(accessDoc()).data.emails
+               || (get(accessDoc()).data.mode == 'domain' && domainOk()))
+        )
+      );
+    }
+
+    // Public settings (announcement, visible chapters): readable by allowed users, written by faculty.
+    match /settings/{doc} {
+      allow read: if allowed();
+      allow write: if isFaculty();
+    }
+
+    // Live exam status: each student writes only their own row; only faculty can read them.
+    match /live/{id} {
+      allow read, delete: if isFaculty();
+      allow create, update: if allowed()
+        && request.resource.data.uid == request.auth.uid
+        && id == request.resource.data.testId + '_' + request.auth.uid;
+    }
+
+    // Access list: only faculty can read or change it.
+    match /config/{doc} {
+      allow read, write: if isFaculty();
+    }
+
+    // Each student's practice activity: only they (and faculty) can read it.
+    match /progress/{uid} {
+      allow read: if isFaculty() || (allowed() && request.auth.uid == uid);
+      allow create, update: if allowed() && request.auth.uid == uid;
+      allow delete: if isFaculty();
+    }
+
+    // Test questions (no answers in here). Allowed students can read a test only while it is open.
+    match /tests/{testId} {
+      allow read: if isFaculty() || (allowed() && resource.data.open == true);
+      allow write: if isFaculty();
+    }
+
+    // Answer keys: faculty only.
+    match /testKeys/{testId} {
+      allow read, write: if isFaculty();
+    }
+
+    // Submissions: one per student per test, only while the test is open, never editable by the student.
+    match /submissions/{subId} {
+      allow read: if isFaculty() || (allowed() && resource.data.uid == request.auth.uid);
+      allow create: if allowed()
+        && request.resource.data.uid == request.auth.uid
+        && subId == request.resource.data.testId + '_' + request.auth.uid
+        && get(/databases/$(database)/documents/tests/$(request.resource.data.testId)).data.open == true
+        && !request.resource.data.keys().hasAny(['score', 'raw', 'penalty', 'per', 'released', 'total', 'review', 'adjust', 'waivePenalty', 'override', 'adjustNote']);
+      allow update, delete: if isFaculty();
+    }
+  }
+}
