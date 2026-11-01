@@ -103,6 +103,7 @@ export function phaseText(ph, sec = 0) {
   const t = sec >= 3 ? ` ${sec} s` : "";
   return ({
     loading: "Starting Java…",
+    server: "Running…",
     "compiling-first": "Preparing the Java compiler (first time only; can take up to a minute)…",
     compiling: "Compiling…",
     running: "Running…",

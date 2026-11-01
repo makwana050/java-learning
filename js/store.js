@@ -1,5 +1,6 @@
 // Login + database (Firebase). Also a local mock used only for offline testing (?dev=1 on localhost).
-import { firebaseConfig, FACULTY_EMAILS, ALLOWED_DOMAIN } from "./config.js";
+import { firebaseConfig, FACULTY_EMAILS, ALLOWED_DOMAIN, RUN_SERVER } from "./config.js";
+import { setRunServer, pingServer } from "./runner.js";
 
 const FB = "https://www.gstatic.com/firebasejs/10.12.2/";
 const params = new URLSearchParams(location.search);
@@ -185,6 +186,8 @@ export const progressOf = uid => db.get("progress", uid);
 // ---------- public settings (announcement, visible chapters) ----------
 export async function loadSettings() {
   try { store.settings = (await db.get("settings", "public")) || {}; } catch { store.settings = {}; }
+  setRunServer(store.settings.runServer != null ? store.settings.runServer : RUN_SERVER);
+  pingServer();
   return store.settings;
 }
 export const saveSettings = fields => db.set("settings", "public", { ...fields, updatedAt: "__now__" }).then(loadSettings);

@@ -22,3 +22,7 @@ export const FACULTY_EMAILS = ["mak005500@gmail.com"];
 export const ALLOWED_DOMAIN = "rru.ac.in";
 
 export const SITE_TITLE = "Java Lab";
+
+// Fast run server (optional). Leave "" to run Java inside the browser only.
+// You can also set or change it any time in Faculty → Settings → Fast run server.
+export const RUN_SERVER = "";

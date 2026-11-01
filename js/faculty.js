@@ -1,3 +1,4 @@
+import { testRunServer } from "./runner.js";
 // Faculty (admin) dashboard: overview, tests (create/edit/run/grade), live monitor, gradebook, students, settings
 import { esc, el, toast, fmtTime, downloadCSV, normBlank, highlightJava, pickQuestions } from "./ui.js";
 import { store, listTests, getKey, saveTest, updateTest, listSubmissions, updateSubmission, listAllProgress, getAccess, saveAccess, isAllowed,
@@ -676,6 +677,13 @@ async function settingsTab(body) {
     <div class="btn-row"><input class="in" id="probe" placeholder="Check an email, e.g. someone@rru.ac.in" style="max-width:360px;font-family:var(--mono)"><button id="check">Check</button><span class="status" id="pmsg"></span></div>
   </div>
 
+  <div class="card"><h3>⚡ Fast run server</h3>
+    <p class="small muted">With a run server, the Run button answers in about a second instead of loading Java into each browser.
+      Paste your server's address (for example <code>https://makwana050-java-lab-runner.hf.space</code>) and press <b>Test</b>.
+      Leave it empty to use in-browser Java only. If the server is ever down, the site automatically falls back to in-browser Java.</p>
+    <div class="btn-row"><input class="in" id="rs-url" placeholder="https://….hf.space" style="max-width:440px;font-family:var(--mono)" value="${esc(settings.runServer || "")}">
+      <button id="rs-test">Test</button><button class="btn-primary" id="rs-save">Save</button><span class="status" id="rs-msg"></span></div></div>
+
   <div class="card"><h3>💾 Backup</h3>
     <p class="small muted">Download every test (with answer keys) as JSON files, plus all submissions as one CSV. Keep these somewhere safe.</p>
     <button id="bk-all">⬇ Download full backup</button><span class="status" id="bk-msg"></span></div>`;
@@ -683,6 +691,23 @@ async function settingsTab(body) {
   body.querySelector("#an-save").onclick = async () => {
     await saveSettings({ announcement: body.querySelector("#an-text").value.trim(), announcementOn: body.querySelector("#an-on").checked });
     const m = body.querySelector("#an-msg"); m.className = "status ok"; m.textContent = "✓ Saved";
+  };
+  const rsMsg = (cls, t) => { const m = body.querySelector("#rs-msg"); m.className = "status " + cls; m.textContent = t; };
+  body.querySelector("#rs-test").onclick = async () => {
+    const url = body.querySelector("#rs-url").value.trim();
+    if (!/^https?:\/\//.test(url)) { rsMsg("bad", "Enter the full address, starting with https://"); return; }
+    rsMsg("", "Testing… (a sleeping free server can take up to a minute to wake up)");
+    try {
+      const r = await testRunServer(url);
+      if (r.status === "ok" && /Hello from the run server/.test(r.output)) rsMsg("ok", `✓ Works: compiled and ran in ${(r.ms / 1000).toFixed(1)} s. Now press Save.`);
+      else rsMsg("bad", "The server answered but something is wrong: " + (r.output || r.status).slice(0, 200));
+    } catch (e) { rsMsg("bad", "Could not reach it (" + e.message + "). Check the address, and that the Space shows 'Running'. If it says 'Building', wait and test again."); }
+  };
+  body.querySelector("#rs-save").onclick = async () => {
+    const url = body.querySelector("#rs-url").value.trim().replace(/\/+$/, "");
+    if (url && !/^https?:\/\//.test(url)) { rsMsg("bad", "Enter the full address, starting with https://"); return; }
+    await saveSettings({ runServer: url });
+    rsMsg("ok", url ? "✓ Saved. Everyone's Run button now uses the server (students: after reloading the page)." : "✓ Saved. Using in-browser Java only.");
   };
   body.querySelector("#ch-all").onclick = () => body.querySelectorAll(".ch-vis").forEach(c => c.checked = true);
   body.querySelector("#ch-save").onclick = async () => {

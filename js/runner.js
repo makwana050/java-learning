@@ -16,6 +16,39 @@ let compilerWarm = false;   // true after the first successful compile in this p
 let busy = null;            // a CheerpJ call that is still running after we stopped waiting for it
 let primePromise = null;
 
+// ---------- fast run server (optional) ----------
+let server = "";            // e.g. https://makwana050-java-lab-runner.hf.space
+let serverDownUntil = 0;    // after a failure, use in-browser Java for a minute
+export function setRunServer(url) { server = (url || "").trim().replace(/\/+$/, ""); }
+export const runServerUrl = () => server;
+const useServer = () => server && (!DEV || params.has("server")) && Date.now() > serverDownUntil;
+
+// Wakes the server up (a free server may be asleep) without running anything.
+export function pingServer() {
+  if (!useServer()) return;
+  fetch(server + "/health", { cache: "no-store" }).catch(() => {});
+}
+
+async function runOnServer(code, onPhase, url = server, waitMs = 45000) {
+  const stop = ticker(onPhase, "server");
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), waitMs);
+  try {
+    const r = await fetch(url + "/run", { method: "POST", body: code, headers: { "Content-Type": "text/plain" }, signal: ctl.signal });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const j = await r.json();
+    if (!j || typeof j.output !== "string") throw new Error("bad reply");
+    return j;
+  } finally { clearTimeout(timer); stop(); }
+}
+
+// Used by the Faculty → Settings "Test" button.
+export async function testRunServer(url) {
+  const t0 = performance.now();
+  const r = await runOnServer('public class Hello { public static void main(String[] a) { System.out.println("Hello from the run server"); } }', () => {}, url.trim().replace(/\/+$/, ""), 90000);
+  return { ...r, ms: Math.round(performance.now() - t0) };
+}
+
 function loadScript(src) {
   return new Promise((res, rej) => {
     const s = document.createElement("script");
@@ -39,6 +72,7 @@ export function warmUp() {
 // Starts Java AND compiles a tiny program in the background, so the compiler is
 // downloaded and ready before the student presses Run for the first time.
 export function primeCompiler() {
+  if (useServer()) { pingServer(); return Promise.resolve(); }
   if (DEV || compilerWarm || primePromise) return primePromise || Promise.resolve();
   primePromise = runJava("public class Warm { public static void main(String[] a) { } }", () => {}, { silent: true })
     .catch(() => {}).finally(() => { primePromise = null; });
@@ -89,6 +123,11 @@ async function doRun(code, onPhase, opts = {}) {
   if (!cls) return { status: "compile", output: "error: no class found.\nEvery Java program needs a class, e.g.  public class Main { ... }" };
   if (!/static\s+void\s+main\s*\(/.test(code))
     return { status: "compile", output: "error: no main method found.\nAdd:  public static void main(String[] args) { ... }" };
+
+  if (useServer() && !opts.silent) {
+    try { return await runOnServer(code, onPhase); }
+    catch (e) { serverDownUntil = Date.now() + 60000; console.warn("Run server unavailable, using in-browser Java:", e.message); }
+  }
 
   if (DEV) {
     onPhase("compiling");
