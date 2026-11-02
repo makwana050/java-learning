@@ -1,6 +1,6 @@
 // Student side of tests: list, take (with integrity rules), submit, see published results
 import { esc, el, toast, fillTemplateHTML, pickQuestions, textCanvas, htmlToText } from "./ui.js";
-import { store, listOpenTests, getTest, mySubmissions, submitTest, setLive, loadExamState, saveExamState, clearExamState } from "./store.js";
+import { store, listOpenTests, getTest, mySubmissions, submitTest, setLive, loadExamState, saveExamState, clearExamState, getStart, saveStart, deviceId } from "./store.js";
 import { runJava, warmUp, primeCompiler } from "./runner.js";
 import { createEditor } from "./editor.js";
 import { phaseText } from "./topic.js";
@@ -73,6 +73,11 @@ export async function renderTakeTest(app, id) {
   if (!saved?.startedAt) return renderStart(app, t, k);
   saved.events = saved.events || [];
   saved.events.push({ at: Math.round((Date.now() - saved.startedAt) / 1000), type: how });
+  saved.devices = saved.devices || [];
+  if (!saved.devices.includes(deviceId())) {
+    saved.devices.push(deviceId());
+    if (saved.devices.length > 1) saved.events.push({ at: Math.round((Date.now() - saved.startedAt) / 1000), type: `opened on another device (${saved.devices.length} devices so far)` });
+  }
   renderPaper(app, t, k, saved);
 }
 
@@ -90,23 +95,49 @@ function rulesList(t) {
   return r.map(x => `<li>${x}</li>`).join("");
 }
 
-function renderStart(app, t, k) {
+// Roll / ID comes from the college email (e.g. 23ce045@student.rru.ac.in → 23CE045), so nobody can type someone else's.
+export const rollFromEmail = email => (email || "").split("@")[0].toUpperCase();
+
+async function renderStart(app, t, k) {
+  app.innerHTML = `<div class="page"><p class="muted">Loading…</p></div>`;
+  const st = await getStart(t.id);
+  const alreadyIn = st && st.session === t.startedAt;          // e.g. allowed a re-attempt
+  if (!alreadyIn && t.lateUntilMs && Date.now() > t.lateUntilMs) {
+    app.innerHTML = `<div class="page" style="max-width:640px"><div class="warn"><b>Entry to this test closed at ${hhmm(new Date(t.lateUntilMs).toISOString())}.</b><br>
+      You can't start it now. If you had a genuine problem, speak to your teacher.</div><a class="btn" href="#/tests">Back to tests</a></div>`;
+    return;
+  }
+  const needCode = t.codeRequired && !alreadyIn;
+  const roll = rollFromEmail(store.user.email);
   app.innerHTML = `<div class="page" style="max-width:720px"><div class="card">
     <div class="kicker">Test</div><h1>${esc(t.title)}</h1>
     ${t.instructions ? `<p>${t.instructions}</p>` : ""}
     <h3>Rules</h3><ul>${rulesList(t)}</ul>
     <div class="field"><div class="label">Signed in as</div><p style="margin:0">${esc(store.user.displayName)} (${esc(store.user.email)})</p></div>
-    <div class="field"><div class="label">Roll number</div><input id="roll" placeholder="e.g. 23CE045" style="font-family:inherit;font-size:1rem"></div>
+    <div class="field"><div class="label">Roll / ID (from your college email)</div><p style="margin:0;font-weight:700;font-size:1.1rem">${esc(roll)}</p></div>
+    ${needCode ? `<div class="field"><div class="label">Start code (your teacher shows it on screen)</div>
+      <input id="code" inputmode="numeric" autocomplete="off" maxlength="6" placeholder="4 digits" style="font-family:var(--mono);font-size:1.4rem;letter-spacing:.3em;width:8ch"></div>` : ""}
+    ${t.lateUntilMs && !alreadyIn ? `<p class="small muted">Entry closes at <b>${hhmm(new Date(t.lateUntilMs).toISOString())}</b>.</p>` : ""}
     <label style="display:flex;gap:.5rem;margin-top:1rem"><input type="checkbox" id="agree"> <span>I have read the rules and will not use any other app, tab, person or AI tool during the test.</span></label>
     <div class="btn-row"><button class="btn-primary" id="start">Start test</button><a class="btn btn-ghost" href="#/tests">Cancel</a></div>
   </div></div>`;
   app.querySelector("#start").onclick = async () => {
-    const roll = app.querySelector("#roll").value.trim();
-    if (!roll) return toast("Please enter your roll number");
     if (!app.querySelector("#agree").checked) return toast("Please accept the rules first");
+    const btn = app.querySelector("#start");
+    if (!alreadyIn) {
+      const code = needCode ? app.querySelector("#code").value.trim() : "";
+      if (needCode && !/^\d{4,6}$/.test(code)) return toast("Enter the start code shown by your teacher");
+      btn.disabled = true;
+      try { await saveStart(t, code); }
+      catch (e) {
+        btn.disabled = false;
+        if (t.lateUntilMs && Date.now() > t.lateUntilMs) return toast("Entry to this test has closed.");
+        return toast(needCode ? "Wrong start code. Check the code on screen and try again." : "Could not start the test: " + (e.code || e.message));
+      }
+    }
     if (t.requireFullscreen) { try { await document.documentElement.requestFullscreen(); } catch { } }
     const { ids, optionOrder } = pickQuestions(t, store.user.uid);
-    const s = { startedAt: Date.now(), roll, answers: {}, picked: ids, optionOrder, cur: 0, qEnds: null, timeSpent: {}, tabSwitches: 0, pasteBlocked: 0, events: [] };
+    const s = { startedAt: Date.now(), roll, answers: {}, picked: ids, optionOrder, cur: 0, qEnds: null, timeSpent: {}, tabSwitches: 0, pasteBlocked: 0, events: [], devices: [deviceId()] };
     localStorage.setItem(k, JSON.stringify(s));
     saveExamState(k, s);
     renderPaper(app, t, k, s);
@@ -129,7 +160,7 @@ function renderPaper(app, t, k, state) {
   const mark = `${state.roll} · ${store.user.email || ""}`;
   const since = () => Math.round((Date.now() - state.startedAt) / 1000);
   const log = type => { state.events.push({ at: since(), type }); if (state.events.length > 200) state.events.shift(); save(); };
-  const live = (extra = {}) => setLive(t.id, { roll: state.roll, n: qs.length, cur: oneAtATime ? (state.cur ?? 0) : null, leaves: state.tabSwitches || 0,
+  const live = (extra = {}) => setLive(t.id, { roll: state.roll, n: qs.length, cur: oneAtATime ? (state.cur ?? 0) : null, leaves: state.tabSwitches || 0, devices: (state.devices || []).length || 1,
     status: "writing", last: state.events.length ? state.events[state.events.length - 1].type : "started", ...extra });
   document.body.classList.add("exam-mode");
 
@@ -333,8 +364,12 @@ function renderPaper(app, t, k, state) {
     sending = true; clearInterval(tick);
     if (!oneAtATime) qs.forEach(captureEditor);
     try {
+      // include devices seen by any other browser that opened this same attempt
+      const other = await loadExamState(k);
+      const devices = [...new Set([...(state.devices || []), ...((other && other.devices) || [])])];
       await submitTest(t.id, {
         testTitle: t.title, roll: state.roll, answers: state.answers, picked: state.picked || null,
+        devices: devices.length || 1,
         tabSwitches: state.tabSwitches || 0, pasteBlocked: state.pasteBlocked || 0,
         events: state.events || [], timeSpent: state.timeSpent || {},
         startedAt: new Date(state.startedAt).toISOString(), autoSubmit: !!auto, autoReason: reason || "",

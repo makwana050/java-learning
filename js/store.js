@@ -1,5 +1,5 @@
 // Login + database (Firebase). Also a local mock used only for offline testing (?dev=1 on localhost).
-import { firebaseConfig, FACULTY_EMAILS, RUN_SERVER, domainAllowed } from "./config.js";
+import { firebaseConfig, FACULTY_EMAILS, RUN_SERVER, domainAllowed, APP_CHECK_SITE_KEY, APP_CHECK_PROVIDER } from "./config.js";
 import { setRunServer, pingServer } from "./runner.js";
 
 const FB = "https://www.gstatic.com/firebasejs/10.12.2/";
@@ -59,6 +59,24 @@ const local = {
   fix(o) { return JSON.parse(JSON.stringify(o, (k, v) => v === "__now__" ? new Date().toISOString() : v)); },
 };
 
+// Offline test mode only: the same checks firestore.rules makes for starting and submitting a test.
+function devRules(coll, id, data, d) {
+  const deny = why => { const e = new Error("permission-denied: " + why); e.code = "permission-denied"; throw e; };
+  const t = d.tests?.[data.testId];
+  if (coll === "starts") {
+    if (!t || !t.open) deny("test not open");
+    if (data.session !== t.startedAt) deny("wrong session");
+    if (t.lateUntilMs != null && Date.now() > t.lateUntilMs) deny("entry closed");
+    if (t.codeRequired && String(data.code) !== String(d.testCodes?.[data.testId]?.code)) deny("wrong code");
+  }
+  if (coll === "submissions" && !d.submissions?.[id]) {
+    if (!t || !t.open) deny("test not open");
+    if (t.endsAtMs != null && Date.now() > t.endsAtMs + 120000) deny("time over");
+    const st = d.starts?.[id];
+    if (!st || st.session !== t.startedAt) deny("not started properly");
+  }
+}
+
 const db = {
   async get(coll, id) {
     if (DEV) { const d = local.load(); return d[coll]?.[id] ? { id, ...unpackNested(d[coll][id]) } : null; }
@@ -69,6 +87,7 @@ const db = {
     if (DEV) {
       const d = local.load(); d[coll] = d[coll] || {};
       if (d[coll][id] && !merge && coll === "submissions") throw new Error("permission-denied: already submitted");
+      if (!store.isFaculty) devRules(coll, id, data, d);
       const packed = packNested(data);
       (function check(x) { if (Array.isArray(x)) { if (hasNested(x)) throw new Error("Nested arrays are not supported"); x.forEach(check); } else if (x && typeof x === "object") Object.values(x).forEach(check); })(packed);
       d[coll][id] = merge ? deepMerge(d[coll][id] || {}, local.fix(packed)) : local.fix(packed);
@@ -108,6 +127,14 @@ export async function initAuth(onChange) {
   }
   const [app, auth, fs] = await Promise.all([import(FB + "firebase-app.js"), import(FB + "firebase-auth.js"), import(FB + "firebase-firestore.js")]);
   const a = app.initializeApp(firebaseConfig);
+  // App Check: only this website (not scripts or copies of it) may use the database.
+  if (APP_CHECK_SITE_KEY) {
+    try {
+      const ac = await import(FB + "firebase-app-check.js");
+      const Provider = APP_CHECK_PROVIDER === "v3" ? ac.ReCaptchaV3Provider : ac.ReCaptchaEnterpriseProvider;
+      ac.initializeAppCheck(a, { provider: new Provider(APP_CHECK_SITE_KEY), isTokenAutoRefreshEnabled: true });
+    } catch (e) { console.warn("App Check could not start", e); }
+  }
   fb = { auth: auth.getAuth(a), db: fs.getFirestore(a), A: auth, F: fs };
   auth.onAuthStateChanged(fb.auth, async u => {
     store.user = u;
@@ -229,6 +256,23 @@ export function saveExamState(k, state) {
 export function clearExamState(k) {
   return db.set("progress", store.user.uid, { exams: { [examKey(k)]: null } }).catch(() => {});
 }
+
+// ---------- exam security ----------
+// A random id for this browser, to notice a test being opened on more than one device.
+export function deviceId() {
+  try {
+    let id = localStorage.getItem("jl-device");
+    if (!id) { id = Math.random().toString(36).slice(2, 10); localStorage.setItem("jl-device", id); }
+    return id;
+  } catch { return "unknown"; }
+}
+// The "start" record: the database only accepts it with the right start code, before entry closes.
+export const getStart = testId => db.get("starts", `${testId}_${store.user.uid}`).catch(() => null);
+export const saveStart = (t, code) => db.set("starts", `${t.id}_${store.user.uid}`,
+  { uid: store.user.uid, testId: t.id, session: t.startedAt, code: String(code || ""), at: "__now__" });
+// Faculty: the secret start code (students can't read it).
+export const setTestCode = (testId, code) => db.set("testCodes", testId, { code: String(code) }, false);
+export const getTestCode = testId => db.get("testCodes", testId);
 
 export function setLive(testId, data) {
   return db.set("live", `${testId}_${store.user.uid}`, {

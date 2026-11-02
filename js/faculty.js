@@ -2,7 +2,7 @@ import { testRunServer } from "./runner.js";
 // Faculty (admin) dashboard: overview, tests (create/edit/run/grade), live monitor, gradebook, students, settings
 import { esc, el, toast, fmtTime, downloadCSV, normBlank, highlightJava, pickQuestions } from "./ui.js";
 import { store, listTests, getKey, saveTest, updateTest, listSubmissions, updateSubmission, listAllProgress, getAccess, saveAccess, isAllowed,
-  deleteTest, deleteSubmission, submissionsOf, listAllSubmissions, progressOf, saveSettings, loadSettings, listLive, clearLive } from "./store.js";
+  deleteTest, deleteSubmission, submissionsOf, listAllSubmissions, progressOf, saveSettings, loadSettings, listLive, clearLive, setTestCode, getTestCode } from "./store.js";
 import { ALLOWED_DOMAIN, FACULTY_EMAILS } from "./config.js";
 import { outputsMatch, codeOnly, missingMust } from "./runner.js";
 import { renderBuilder, toEditable, toJSON } from "./builder.js";
@@ -161,6 +161,8 @@ async function testsTab(body) {
              <span>Marks deducted per leave</span><input type="number" class="pen" min="0" step="0.25" value="${t.penaltyPerLeave ?? 0}" style="width:6ch">
              <span>Auto-submit after leaves <span class="muted">(0 = never)</span></span><input type="number" class="auto" min="0" value="${t.autoSubmitAfter ?? 0}" style="width:6ch">
              <span>Require full screen</span><input type="checkbox" class="fs" ${t.requireFullscreen ? "checked" : ""}>
+             <span>Start code <span class="muted">(you show it on screen)</span></span><input type="checkbox" class="code" ${t.codeRequired !== false ? "checked" : ""}>
+             <span>Entry closes after (min) <span class="muted">(0 = never)</span></span><input type="number" class="late" min="0" value="${t.lateMin ?? 10}" style="width:6ch">
            </div>
            <button class="btn-run small start">▶ Start now</button>`}</td>
       <td>${t.released ? '<span class="pill blue">Published</span>' : '<span class="pill">Hidden</span>'}<br>
@@ -195,13 +197,16 @@ async function testsTab(body) {
       const num = (sel, f = parseFloat) => Math.max(0, f(tr.querySelector(sel).value) || 0);
       const d = num(".dur", v => parseInt(v, 10)), pq = num(".pq", v => parseInt(v, 10)), pen = num(".pen"), auto = num(".auto", v => parseInt(v, 10));
       const fs = tr.querySelector(".fs").checked;
+      const useCode = tr.querySelector(".code").checked, late = num(".late", v => parseInt(v, 10));
       const n = t.pick || t.questions.length;
       if (pq && d && pq * n > d * 60 && !confirm(`${n} questions × ${pq}s = ${Math.ceil(pq * n / 60)} min, more than the total time of ${d} min. Start anyway?`)) return;
       if (counts[t.id] && !confirm(`${counts[t.id]} student(s) already submitted an earlier run of this test. Their submissions stay, and they will not be able to take it again unless you allow a re-attempt. Continue?`)) return;
-      if (!confirm(`Start "${t.title}" now?\n\nTotal time: ${d ? d + " min" : "no limit"}\nPer question: ${pq ? pq + " s, one at a time" : "all on one page"}\nPenalty per leave: ${pen}\nAuto-submit after: ${auto || "never"}\nFull screen: ${fs ? "yes" : "no"}`)) return;
+      if (!confirm(`Start "${t.title}" now?\n\nTotal time: ${d ? d + " min" : "no limit"}\nPer question: ${pq ? pq + " s, one at a time" : "all on one page"}\nPenalty per leave: ${pen}\nAuto-submit after: ${auto || "never"}\nFull screen: ${fs ? "yes" : "no"}\nStart code: ${useCode ? "yes (shown on the live monitor)" : "no"}\nEntry closes: ${late ? "after " + late + " min" : "never"}`)) return;
       const now = Date.now();
+      if (useCode) await setTestCode(t.id, newCode());
       await updateTest(t.id, { open: true, durationMin: d, perQuestionSec: pq, penaltyPerLeave: pen, autoSubmitAfter: auto, requireFullscreen: fs,
-        startedAt: new Date(now).toISOString(), endsAt: d ? new Date(now + d * 60000).toISOString() : null });
+        codeRequired: useCode, lateMin: late, lateUntilMs: late ? now + late * 60000 : null,
+        startedAt: new Date(now).toISOString(), endsAt: d ? new Date(now + d * 60000).toISOString() : null, endsAtMs: d ? now + d * 60000 : null });
       toast("Test is LIVE — tell students to open the Tests page");
       await testsTab(body);
       const tt = (await listTests()).find(x => x.id === t.id);
@@ -209,7 +214,7 @@ async function testsTab(body) {
     });
     tr.querySelector(".extend")?.addEventListener("click", async () => {
       const base = t.endsAt ? new Date(t.endsAt).getTime() : Date.now();
-      await updateTest(t.id, { endsAt: new Date(base + 5 * 60000).toISOString(), durationMin: (t.durationMin || 0) + 5 });
+      await updateTest(t.id, { endsAt: new Date(base + 5 * 60000).toISOString(), endsAtMs: base + 5 * 60000, durationMin: (t.durationMin || 0) + 5 });
       toast("Extended by 5 minutes");
       testsTab(body);
     });
@@ -239,18 +244,34 @@ async function testsTab(body) {
   });
 }
 
+const newCode = () => String(Math.floor(1000 + Math.random() * 9000));
+
 // ---------- live monitor ----------
 async function liveMonitor(host, t) {
   clearInterval(liveTimer);
-  host.innerHTML = `<h2><span class="live-dot"></span>Live monitor — ${esc(t.title)}</h2><div id="lm"></div>`;
-  const lm = host.querySelector("#lm");
+  host.innerHTML = `<h2><span class="live-dot"></span>Live monitor — ${esc(t.title)}</h2><div id="lm-gate"></div><div id="lm"></div>`;
+  const lm = host.querySelector("#lm"), gate = host.querySelector("#lm-gate");
+  const drawGate = async () => {
+    const code = t.codeRequired ? (await getTestCode(t.id))?.code : null;
+    const entry = t.lateUntilMs ? (Date.now() < t.lateUntilMs ? `Entry closes at <b>${fmtClock(new Date(t.lateUntilMs).toISOString())}</b>` : `<b style="color:var(--bad)">Entry closed</b> at ${fmtClock(new Date(t.lateUntilMs).toISOString())}`) : "Entry open until the test ends";
+    gate.innerHTML = `<div class="card" style="display:flex;gap:1.5rem;align-items:center;flex-wrap:wrap">
+      ${code ? `<div><div class="small muted">START CODE: show this on screen</div><div style="font-family:var(--mono);font-size:3rem;font-weight:800;letter-spacing:.25em;line-height:1.1">${esc(code)}</div></div>
+        <button class="small" id="lm-newcode" title="Students who already started are not affected">↻ New code</button>` : `<div class="small muted">No start code for this run.</div>`}
+      <div class="small">${entry}<br><button class="small" id="lm-late" style="margin-top:.3rem">Keep entry open 5 more min</button></div></div>`;
+    gate.querySelector("#lm-newcode")?.addEventListener("click", async () => { await setTestCode(t.id, newCode()); toast("New start code set"); drawGate(); });
+    gate.querySelector("#lm-late").onclick = async () => {
+      const until = Math.max(Date.now(), t.lateUntilMs || 0) + 5 * 60000;
+      await updateTest(t.id, { lateUntilMs: until }); t.lateUntilMs = until; toast("Entry kept open 5 more minutes"); drawGate();
+    };
+  };
+  await drawGate();
   host.scrollIntoView({ behavior: "smooth" });
   const draw = async () => {
     if (!document.body.contains(lm)) return clearInterval(liveTimer);
     const [rows, subs] = await Promise.all([listLive(t.id), listSubmissions(t.id)]);
     const subUids = new Set(subs.map(s => s.uid));
     const all = rows.map(r => ({ ...r, done: subUids.has(r.uid) || r.status === "submitted" }));
-    subs.forEach(s => { if (!all.some(r => r.uid === s.uid)) all.push({ uid: s.uid, name: s.name, email: s.email, roll: s.roll, done: true, leaves: s.tabSwitches || 0 }); });
+    subs.forEach(s => { if (!all.some(r => r.uid === s.uid)) all.push({ uid: s.uid, name: s.name, email: s.email, roll: s.roll, done: true, leaves: s.tabSwitches || 0, devices: s.devices || 1 }); });
     all.sort((a, b) => (b.leaves || 0) - (a.leaves || 0) || String(a.roll).localeCompare(String(b.roll), undefined, { numeric: true }));
     const writing = all.filter(r => !r.done), done = all.filter(r => r.done);
     const ago = iso => { if (!iso) return ""; const s = Math.round((Date.now() - new Date(iso).getTime()) / 1000); return s < 60 ? s + "s ago" : Math.floor(s / 60) + " min ago"; };
@@ -262,7 +283,7 @@ async function liveMonitor(host, t) {
         <div class="stat"><b>${left == null ? "–" : Math.floor(left / 60) + ":" + String(left % 60).padStart(2, "0")}</b><span>time left</span></div></div>
       <p class="small muted">Refreshes every 10 seconds · last update ${new Date().toLocaleTimeString()}</p>
       <table class="tbl"><thead><tr><th>Roll</th><th>Name</th><th>Status</th><th class="num">Question</th><th class="num">Left test</th><th>Last event</th><th>Last seen</th></tr></thead><tbody>
-      ${all.map(r => `<tr style="${(r.leaves || 0) >= 2 ? "background:#fdecec" : ""}"><td>${esc(r.roll || "")}</td><td>${esc(r.name)}<br><span class="small muted">${esc(r.email || "")}</span></td>
+      ${all.map(r => `<tr style="${(r.leaves || 0) >= 2 || (r.devices || 1) > 1 ? "background:#fdecec" : ""}"><td>${esc(r.roll || "")}</td><td>${esc(r.name)}<br><span class="small muted">${esc(r.email || "")}</span>${(r.devices || 1) > 1 ? `<br><span class="pill bad">⚠ ${r.devices} devices</span>` : ""}</td>
         <td>${r.done ? '<span class="pill ok">Submitted</span>' : r.away ? '<span class="pill bad">AWAY from test</span>' : '<span class="pill blue">Writing</span>'}</td>
         <td class="num">${r.done ? "–" : r.cur != null ? `${r.cur + 1} / ${r.n}` : ""}</td>
         <td class="num" style="${r.leaves ? "color:var(--bad);font-weight:700" : ""}">${r.leaves || 0}</td>
@@ -361,6 +382,7 @@ function gradeSubmission(t, key, s) {
     review.push({ n: i + 1, id, q: q.q, code: q.code || "", type: q.type, yours: String(yours ?? ""), correct: String(correct ?? ""), marks: g.marks, max: q.marks || 1, explain: k?.explain || "", secs: s.timeSpent?.[id] ?? null });
   });
   if (t.pick && s.picked && pickQuestions(t, s.uid).ids.join() !== s.picked.join()) flags.push("question set doesn't match the one assigned");
+  if ((s.devices || 1) > 1) flags.push(`⚠ opened on ${s.devices} devices`);
   if (s.tabSwitches) flags.push(`left the page ${s.tabSwitches}×`);
   if (s.pasteBlocked) flags.push(`tried to paste ${s.pasteBlocked}×`);
   const raw = Math.round(score * 100) / 100;

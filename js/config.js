@@ -28,3 +28,8 @@ export const SITE_TITLE = "Java Lab";
 // Fast run server (optional). Leave "" to run Java inside the browser only.
 // You can also set or change it any time in Faculty → Settings → Fast run server.
 export const RUN_SERVER = "";
+
+// App Check (optional, recommended): only this website can use the database.
+// Leave "" until you have set it up (see the guide). Provider: "enterprise" or "v3".
+export const APP_CHECK_SITE_KEY = "";
+export const APP_CHECK_PROVIDER = "enterprise";
