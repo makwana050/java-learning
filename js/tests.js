@@ -85,7 +85,8 @@ function rulesList(t) {
   const n = t.pick || t.questions.length;
   const r = [];
   r.push(`${n} questions${t.pick ? " — every student gets a different random set" : ""}.`);
-  if (t.perQuestionSec) r.push(`<b>One question at a time, ${t.perQuestionSec} seconds each.</b> When the time is up the next question appears automatically. <b>You cannot go back.</b>`);
+  if (t.perQuestionSec && isOneAtATime(t)) r.push(`<b>One question at a time, at least ${t.perQuestionSec} seconds each</b> (the timer on each question shows its time). When the time is up the next question appears automatically. <b>You cannot go back.</b>`);
+  else if (isOneAtATime(t)) r.push(`<b>One question at a time.</b> Press <b>Next</b> when you are ready. <b>You cannot go back</b> to earlier questions.`);
   if (t.endsAt) r.push(`The test ends at <b>${hhmm(t.endsAt)}</b> for everyone and submits automatically.`);
   if (t.requireFullscreen) r.push(`The test runs in <b>full screen</b>.`);
   r.push(`<b>Do not leave the test window.</b> Switching tab or app, opening a sidebar or assistant (e.g. Copilot), resizing/splitting the window${t.requireFullscreen ? ", leaving full screen" : ""} or pressing Print Screen is recorded with the time and shown to your teacher.`);
@@ -94,6 +95,9 @@ function rulesList(t) {
   r.push(`Copying, pasting and right-click are disabled. You can submit only once.`);
   return r.map(x => `<li>${x}</li>`).join("");
 }
+
+// One question at a time? (older tests: yes whenever they have a per-question time)
+export const isOneAtATime = t => t.oneAtATime != null ? !!t.oneAtATime : (t.perQuestionSec || 0) > 0;
 
 // Roll / ID comes from the college email (e.g. 23ce045@student.rru.ac.in → 23CE045), so nobody can type someone else's.
 export const rollFromEmail = email => (email || "").split("@")[0].toUpperCase();
@@ -156,7 +160,8 @@ function renderPaper(app, t, k, state) {
   const editors = {};
   const byId = Object.fromEntries(t.questions.map(q => [q.id, q]));
   const qs = (state.picked || t.questions.map(q => q.id)).map(id => byId[id]).filter(Boolean);
-  const oneAtATime = (t.perQuestionSec || 0) > 0;
+  const oneAtATime = isOneAtATime(t);
+  const timedQs = oneAtATime && (t.perQuestionSec || 0) > 0;     // a countdown on each question
   const mark = `${state.roll} · ${store.user.email || ""}`;
   const since = () => Math.round((Date.now() - state.startedAt) / 1000);
   const log = type => { state.events.push({ at: since(), type }); if (state.events.length > 200) state.events.shift(); save(); };
@@ -234,14 +239,15 @@ function renderPaper(app, t, k, state) {
     const cur = state.answers[q.id] || {};
     if (cur.code !== ed.getValue()) state.answers[q.id] = { ...cur, code: ed.getValue(), editedAfterRun: true };
   };
-  const qTime = q => q.timeSec || t.perQuestionSec;
+  // the faculty's "seconds per question" is the minimum; a question with more time of its own keeps it
+  const qTime = q => timedQs ? Math.max(t.perQuestionSec, q.timeSec || 0) : null;
 
   // ---------- one-at-a-time flow ----------
   let shownAt = Date.now();
   function show(i) {
     state.cur = i;
     const q = qs[i];
-    if (!state.qEnds) state.qEnds = Date.now() + qTime(q) * 1000;
+    if (!state.qEnds && timedQs) state.qEnds = Date.now() + qTime(q) * 1000;
     save();
     shownAt = Date.now();
     live({ away: false });
@@ -403,7 +409,7 @@ function renderPaper(app, t, k, state) {
       clock.textContent = `⏱ ${fmt(left)} total`;
       clock.style.color = left < 120 ? "#fca5a5" : "";
     } else clock.textContent = "";
-    if (oneAtATime && !sending) {
+    if (timedQs && !sending) {
       const ql = Math.round((state.qEnds - Date.now()) / 1000);
       if (ql <= 0) { qclock.textContent = ""; return next(true); }
       qclock.innerHTML = `<span style="background:${ql <= 10 ? "#b91c1c" : "#c2410c"};padding:.15rem .55rem;border-radius:6px;margin-right:.6rem">This question: ${ql}s</span>`;
@@ -412,7 +418,7 @@ function renderPaper(app, t, k, state) {
 
   if (oneAtATime) {
     // after a reload, skip questions whose time already ran out
-    while (state.qEnds && Date.now() > state.qEnds && state.cur < qs.length - 1) {
+    while (timedQs && state.qEnds && Date.now() > state.qEnds && state.cur < qs.length - 1) {
       log(`time up on question ${state.cur + 1} (while away)`);
       state.cur++; state.qEnds = state.cur < qs.length ? Date.now() + qTime(qs[state.cur]) * 1000 : null;
     }

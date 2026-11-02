@@ -157,7 +157,10 @@ async function testsTab(body) {
         : `<span class="pill">Not running</span>
            <div class="small settings" style="display:grid;grid-template-columns:auto auto;gap:.2rem .5rem;margin:.4rem 0;align-items:center">
              <span>Total time (min)</span><input type="number" class="dur" min="0" value="${t.durationMin || 30}" style="width:6ch">
-             <span>Seconds per question <span class="muted">(0 = all on one page)</span></span><input type="number" class="pq" min="0" value="${t.perQuestionSec ?? 0}" style="width:6ch">
+             <span>Show questions</span><select class="layout" style="font:inherit">
+               <option value="one" ${(t.oneAtATime ?? (t.perQuestionSec || 0) > 0) ? "selected" : ""}>One at a time (no going back)</option>
+               <option value="all" ${(t.oneAtATime ?? (t.perQuestionSec || 0) > 0) ? "" : "selected"}>All on one page</option></select>
+             <span>Seconds per question <span class="muted">(0 = no limit, they press Next)</span></span><input type="number" class="pq" min="0" value="${t.perQuestionSec ?? 0}" style="width:6ch">
              <span>Marks deducted per leave</span><input type="number" class="pen" min="0" step="0.25" value="${t.penaltyPerLeave ?? 0}" style="width:6ch">
              <span>Auto-submit after leaves <span class="muted">(0 = never)</span></span><input type="number" class="auto" min="0" value="${t.autoSubmitAfter ?? 0}" style="width:6ch">
              <span>Require full screen</span><input type="checkbox" class="fs" ${t.requireFullscreen ? "checked" : ""}>
@@ -195,16 +198,17 @@ async function testsTab(body) {
     const t = tests.find(x => x.id === tr.dataset.id);
     tr.querySelector(".start")?.addEventListener("click", async () => {
       const num = (sel, f = parseFloat) => Math.max(0, f(tr.querySelector(sel).value) || 0);
-      const d = num(".dur", v => parseInt(v, 10)), pq = num(".pq", v => parseInt(v, 10)), pen = num(".pen"), auto = num(".auto", v => parseInt(v, 10));
+      const one = tr.querySelector(".layout").value === "one";
+      const d = num(".dur", v => parseInt(v, 10)), pq = one ? num(".pq", v => parseInt(v, 10)) : 0, pen = num(".pen"), auto = num(".auto", v => parseInt(v, 10));
       const fs = tr.querySelector(".fs").checked;
       const useCode = tr.querySelector(".code").checked, late = num(".late", v => parseInt(v, 10));
       const n = t.pick || t.questions.length;
-      if (pq && d && pq * n > d * 60 && !confirm(`${n} questions × ${pq}s = ${Math.ceil(pq * n / 60)} min, more than the total time of ${d} min. Start anyway?`)) return;
+      if (one && pq && d && pq * n > d * 60 && !confirm(`${n} questions × ${pq}s = ${Math.ceil(pq * n / 60)} min, more than the total time of ${d} min. Start anyway?`)) return;
       if (counts[t.id] && !confirm(`${counts[t.id]} student(s) already submitted an earlier run of this test. Their submissions stay, and they will not be able to take it again unless you allow a re-attempt. Continue?`)) return;
-      if (!confirm(`Start "${t.title}" now?\n\nTotal time: ${d ? d + " min" : "no limit"}\nPer question: ${pq ? pq + " s, one at a time" : "all on one page"}\nPenalty per leave: ${pen}\nAuto-submit after: ${auto || "never"}\nFull screen: ${fs ? "yes" : "no"}\nStart code: ${useCode ? "yes (shown on the live monitor)" : "no"}\nEntry closes: ${late ? "after " + late + " min" : "never"}`)) return;
+      if (!confirm(`Start "${t.title}" now?\n\nTotal time: ${d ? d + " min" : "no limit"}\nQuestions: ${one ? (pq ? "one at a time, " + pq + " s each" : "one at a time, no time limit per question (they press Next)") : "all on one page"}\nPenalty per leave: ${pen}\nAuto-submit after: ${auto || "never"}\nFull screen: ${fs ? "yes" : "no"}\nStart code: ${useCode ? "yes (shown on the live monitor)" : "no"}\nEntry closes: ${late ? "after " + late + " min" : "never"}`)) return;
       const now = Date.now();
       if (useCode) await setTestCode(t.id, newCode());
-      await updateTest(t.id, { open: true, durationMin: d, perQuestionSec: pq, penaltyPerLeave: pen, autoSubmitAfter: auto, requireFullscreen: fs,
+      await updateTest(t.id, { open: true, oneAtATime: one, durationMin: d, perQuestionSec: pq, penaltyPerLeave: pen, autoSubmitAfter: auto, requireFullscreen: fs,
         codeRequired: useCode, lateMin: late, lateUntilMs: late ? now + late * 60000 : null,
         startedAt: new Date(now).toISOString(), endsAt: d ? new Date(now + d * 60000).toISOString() : null, endsAtMs: d ? now + d * 60000 : null });
       toast("Test is LIVE — tell students to open the Tests page");
