@@ -429,6 +429,16 @@ async function submissionsView(host, t, body) {
     await Promise.all(graded.map(s => updateSubmission(s.id, { score: s.auto.score, raw: s.auto.raw, penalty: s.auto.penalty, total: s.auto.total, per: s.auto.per, review: s.auto.review, released })));
   };
   host.querySelector("#save").onclick = async () => { await saveScores(!!t.released); toast("Scores saved"); };
+  // Results already published: anyone who submitted (or whose marks changed) after publishing
+  // gets their result published automatically, so no student is left on "not published".
+  if (t.released) {
+    const stale = graded.filter(s => !s.released || s.score !== s.auto.score || s.total !== s.auto.total);
+    if (stale.length) {
+      Promise.all(stale.map(s => updateSubmission(s.id, { score: s.auto.score, raw: s.auto.raw, penalty: s.auto.penalty, total: s.auto.total, per: s.auto.per, review: s.auto.review, released: true })))
+        .then(() => toast(`Published results for ${stale.length} more student(s) (submitted or changed after you published).`))
+        .catch(e => toast("Could not publish some results: " + e.message));
+    }
+  }
   host.querySelector("#rel").onclick = async () => {
     const rel = !t.released;
     await saveScores(rel); await updateTest(t.id, { released: rel });

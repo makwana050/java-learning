@@ -38,6 +38,7 @@ function unpackNested(v) {
   return v;
 }
 function toFs(obj) { // convert inc() markers + timestamps for Firestore
+  if (obj === undefined) return null;   // Firestore refuses undefined values
   if (obj && typeof obj === "object" && INC in obj) return fb.F.increment(obj[INC]);
   if (obj === "__now__") return fb.F.serverTimestamp();
   if (Array.isArray(obj)) { if (hasNested(obj)) return { __json: JSON.stringify(obj) }; return obj.map(toFs); }
