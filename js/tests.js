@@ -114,11 +114,29 @@ function rulesList(t) {
   else if (isOneAtATime(t)) r.push(`<b>One question at a time.</b> Press <b>Next</b> when you are ready. <b>You cannot go back</b> to earlier questions.`);
   if (t.endsAt) r.push(`The test ends at <b>${hhmm(t.endsAt)}</b> for everyone and submits automatically.`);
   if (t.requireFullscreen) r.push(`The test runs in <b>full screen</b>.`);
-  r.push(`<b>Do not leave the test window.</b> Switching tab or app, opening a sidebar or assistant (e.g. Copilot), resizing/splitting the window${t.requireFullscreen ? ", leaving full screen" : ""} or pressing Print Screen is recorded with the time and shown to your teacher.`);
+  r.push(`<b>Do not leave the test window.</b> Switching tab or app, opening a sidebar or assistant (e.g. Copilot), resizing/splitting the window${t.requireFullscreen ? ", leaving full screen" : ""} or pressing Print Screen is recorded.`);
   if (t.penaltyPerLeave) r.push(`<b>Each time you leave, ${t.penaltyPerLeave} mark${t.penaltyPerLeave === 1 ? "" : "s"} will be deducted.</b>`);
   if (t.autoSubmitAfter) r.push(`<b>After ${t.autoSubmitAfter} leaves, your test is submitted automatically.</b>`);
   r.push(`Copying, pasting and right-click are disabled. You can submit only once.`);
   return r.map(x => `<li>${x}</li>`).join("");
+}
+
+// A question box drawn inside the page. The browser's own confirm()/alert() pop-ups take focus
+// away from the page and end full screen, which the test counts as leaving, so the test never uses them.
+function askBox(message, { ok = "OK", cancel = "Cancel" } = {}) {
+  return new Promise(resolve => {
+    const wrap = document.createElement("div");
+    wrap.className = "ask-box";
+    wrap.style.cssText = "position:fixed;inset:0;z-index:10000;background:rgba(20,20,20,.45);display:flex;align-items:center;justify-content:center;padding:16px";
+    wrap.innerHTML = `<div style="background:var(--card,#fff);color:inherit;max-width:460px;width:100%;border-radius:12px;padding:1.2rem 1.3rem;box-shadow:0 10px 40px rgba(0,0,0,.25)">
+      <div style="white-space:pre-line;margin-bottom:1rem">${esc(message)}</div>
+      <div class="btn-row" style="justify-content:flex-end">${cancel ? `<button class="ab-no">${esc(cancel)}</button>` : ""}<button class="btn-primary ab-yes">${esc(ok)}</button></div></div>`;
+    const done = v => { wrap.remove(); resolve(v); };
+    wrap.querySelector(".ab-yes").onclick = () => done(true);
+    wrap.querySelector(".ab-no")?.addEventListener("click", () => done(false));
+    document.body.appendChild(wrap);
+    wrap.querySelector(".ab-yes").focus();
+  });
 }
 
 // One question at a time? (older tests: yes whenever they have a per-question time)
@@ -239,11 +257,10 @@ function renderPaper(app, t, k, state) {
       ins.forEach((inp, j) => { inp.value = (a || [])[j] || ""; inp.oninput = () => { state.answers[q.id] = ins.map(x => x.value); save(); }; });
     } else if (q.type === "code") {
       if (q.mustUse?.length) card.insertAdjacentHTML("beforeend", `<div class="musts"><span class="small muted">Your code must use:</span>${q.mustUse.map(m => `<code>${esc(m)}</code>`).join("")}</div>`);
-      if (q.manual) card.insertAdjacentHTML("beforeend", `<div class="warn" style="margin:.6rem 0">✍️ Your teacher will check this program personally. Write it and Run it; the output can differ slightly from the sample.</div>`);
       if (q.expected) {
         const exps = [].concat(q.expected);
         exps.forEach((e, j) => {
-          card.insertAdjacentHTML("beforeend", `<div class="label">${q.manual ? "Sample output" : "Expected output"}${exps.length > 1 ? ` — Option ${String.fromCharCode(65 + j)}` : ""}</div>`);
+          card.insertAdjacentHTML("beforeend", `<div class="label">${"Expected output"}${exps.length > 1 ? ` — Option ${String.fromCharCode(65 + j)}` : ""}</div>`);
           card.appendChild(textCanvas(e, { mono: true, width: w, size: 14, bg: "#f8f7f3", pad: 12 }));
         });
       }
@@ -263,9 +280,9 @@ function renderPaper(app, t, k, state) {
             const name = (part.match(/^\/\/ =+ (Option [A-Z])/) || [])[1] || "";
             hb.appendChild(textCanvas(part, { mono: true, width: w, size: 14, bg: "#fff8e1", pad: 12 }));
             const put = el(`<button class="small" style="margin:.4rem 0 .8rem">Put the ${name ? name + " " : ""}hint code in my editor</button>`);
-            put.onclick = () => {
+            put.onclick = async () => {
               const ed = editors[q.id]; if (!ed) return;
-              if (ed.getValue().trim() && !confirm("Replace the code in your editor with this hint code?")) return;
+              if (ed.getValue().trim() && !(await askBox("Replace the code in your editor with this hint code?", { ok: "Replace" }))) return;
               ed.setValue(part.replace(/^\/\/ =+ Option [A-Z][^\n]*\n/, "")); log(`hint code put in editor (Q${i + 1}${name ? ", " + name : ""})`);
             };
             hb.appendChild(put);
@@ -275,7 +292,7 @@ function renderPaper(app, t, k, state) {
         else {
           const b = el(`<button class="small" style="border-color:#e0a800">💡 Show hint (−${pen}% marks for this question)</button>`);
           b.onclick = async () => {
-            if (!confirm(`Show the hint for this question?\n\n${pen}% of this question's marks will be deducted, even if you don't use it. This can't be undone.`)) return;
+            if (!(await askBox(`Show the hint for this question?\n\n${pen}% of this question's marks will be deducted, even if you don't use it. This can't be undone.`, { ok: "Show hint" }))) return;
             b.disabled = true; b.textContent = "Loading hint…";
             try {
               const text = await takeHint(t.id, q.id);
@@ -431,7 +448,7 @@ function renderPaper(app, t, k, state) {
     if (sending) return;
     if (mode === "confirm") {
       ignoreUntil = Date.now() + 60000;
-      const ok = confirm("Submit now? You cannot change your answers after this.");
+      const ok = await askBox("Submit now? You cannot change your answers after this.", { ok: "Submit" });
       ignoreUntil = Date.now() + 500;
       if (!ok) return;
     }
@@ -454,12 +471,12 @@ function renderPaper(app, t, k, state) {
       stopExam();
       app.innerHTML = `<div class="page" style="max-width:640px"><div class="card"><h1>✓ Submitted</h1>
         <p>Your answers for <b>${esc(t.title)}</b> were submitted${reason ? ` automatically because ${esc(reason)}` : auto ? " automatically because time ran out" : ""}.</p>
-        ${state.tabSwitches ? `<p style="color:var(--bad)">You left the test ${state.tabSwitches} time(s). This has been reported to your teacher.</p>` : ""}
-        <p>Your marks and the correct answers will appear on the Tests page as soon as your teacher publishes the results.</p>
+        ${state.tabSwitches ? `<p style="color:var(--bad)">You left the test ${state.tabSwitches} time(s).</p>` : ""}
+        <p>Your marks and the correct answers will appear on the Tests page as soon as the results are published.</p>
         <a class="btn btn-primary" href="#/tests">Go to Tests</a></div></div>`;
     } catch (e) {
       sending = false;
-      alert("Submission failed: " + (e.code || e.message) + "\nYour answers are still saved on this computer. Check your internet and submit again.\n(If the teacher has stopped the test, submissions are no longer accepted.)");
+      askBox("Submission failed: " + (e.code || e.message) + "\nYour answers are still saved on this computer. Check your internet and submit again.\n(If the test has been stopped, submissions are no longer accepted.)", { cancel: "" });
     }
   }
   window.onbeforeunload = () => "Your test is in progress.";
