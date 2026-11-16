@@ -4,7 +4,7 @@ import { esc, el, toast, fmtTime, downloadCSV, normBlank, highlightJava, pickQue
 import { store, listTests, getKey, saveTest, updateTest, listSubmissions, updateSubmission, listAllProgress, getAccess, saveAccess, isAllowed,
   deleteTest, deleteSubmission, submissionsOf, listAllSubmissions, progressOf, saveSettings, loadSettings, listLive, clearLive, setTestCode, getTestCode, publishIndex, removeIndex, hintUsesOf } from "./store.js";
 import { ALLOWED_DOMAIN, FACULTY_EMAILS } from "./config.js";
-import { outputsMatch, codeOnly, missingMust } from "./runner.js";
+import { outputsMatch, codeOnly, missingMust, runJava, normalizeOutput } from "./runner.js";
 import { renderBuilder, toEditable, toJSON } from "./builder.js";
 import { COURSE } from "../content/course.js";
 const FACULTY_EMAILS_LIST = FACULTY_EMAILS.map(e => e.toLowerCase());
@@ -363,6 +363,14 @@ export function splitTest(json) {
       if (q.starter) p.starter = q.starter;
       if (q.mustUse) p.mustUse = q.mustUse;
       keyQ[q.id] = { expected: q.expected, mustUse: q.mustUse || [] };
+      if (q.rubric != null) {   // one checklist per option: [{ label, re, flags? }, ...]
+        const rub = Array.isArray(q.rubric[0]) ? q.rubric : [q.rubric];
+        rub.forEach((list, j) => list.forEach((it, x) => {
+          if (!it || typeof it.re !== "string") throw new Error(`${where}: rubric item ${x + 1} of option ${j + 1} needs "re"`);
+          try { new RegExp(it.re, it.flags || ""); } catch (e) { throw new Error(`${where}: rubric item "${it.label || it.re}" has a bad pattern: ${e.message}`); }
+        }));
+        keyQ[q.id].rubric = rub;
+      }
       if (q.partial != null) {   // e.g. 0.5 = half marks for an attempt whose output is not right
         if (!(q.partial >= 0 && q.partial <= 1)) throw new Error(`${where}: "partial" must be between 0 and 1 (0.5 = half marks)`);
         keyQ[q.id].partial = +q.partial;
@@ -386,9 +394,34 @@ export function splitTest(json) {
   };
 }
 
+// Share of the expected output lines that the program printed, in the right order (0..1).
+function lineMatch(output, expected) {
+  const norm = s => normalizeOutput(s || "").split("\n").map(l => l.replace(/\s+$/, ""));
+  const e = norm(expected).filter(l => l.trim()), o = norm(output).filter(l => l.trim());
+  if (!e.length) return 0;
+  const dp = Array.from({ length: e.length + 1 }, () => new Array(o.length + 1).fill(0));   // longest common subsequence
+  for (let i = 1; i <= e.length; i++) for (let j = 1; j <= o.length; j++)
+    dp[i][j] = e[i - 1] === o[j - 1] ? dp[i - 1][j - 1] + 1 : Math.max(dp[i - 1][j], dp[i][j - 1]);
+  return dp[e.length][o.length] / e.length;
+}
+
 function gradeQuestion(q, k, a) {
   const m = q.marks || 1;
-  if (q.manual) return { marks: 0, flag: a?.code ? "mark by hand (View / adjust)" : "not attempted" };
+  if (q.manual) {
+    if (!a?.code) return { marks: 0, flag: "not attempted" };
+    let tip = "";
+    const code = codeOnly(a.code || "");
+    if (k?.rubric && code.replace(/\s+/g, "").length > 70) {
+      const exps = [].concat(k.expected ?? []);
+      const ran = a.status === "ok" || a.status === "runtime" || a.status === "timeout";
+      const best = k.rubric.map((list, j) => {
+        const f = list.length ? list.filter(it => new RegExp(it.re, it.flags || "").test(code)).length / list.length : 0;
+        return { j, f, o: ran ? lineMatch(a.output, exps[j] ?? exps[0]) : 0 };
+      }).sort((x, y) => (y.f + y.o) - (x.f + x.o))[0];
+      tip = `; suggested ≈ ${Math.round(m * (0.5 * best.f + 0.5 * best.o) * 4) / 4}/${m} (code ${Math.round(best.f * 100)}%, output ${Math.round(best.o * 100)}%)`;
+    }
+    return { marks: 0, flag: "mark by hand (View / adjust)" + tip };
+  }
   if (!k || a == null) return { marks: 0 };
   if (q.type === "mcq") return { marks: a === k.answer ? m : 0 };
   if (q.type === "output") return { marks: k.answer.some(x => outputsMatch(a, x)) ? m : 0 };
@@ -407,9 +440,31 @@ function gradeQuestion(q, k, a) {
     // an attempt = the student ran some code of their own (not just the empty starter)
     const attempted = (a.runs || 0) > 0 && code.replace(/\s+/g, "").length > 70;
     let marks = outOk && !missing.length ? m : 0;
-    if (!marks && k.partial && attempted) marks = Math.round(m * k.partial * 100) / 100;
+    const notes = [];
+    if (k.rubric && code.replace(/\s+/g, "").length > 70) {
+      // judge the program itself: key parts present in the code + expected lines its last run printed
+      const ran = a.status === "ok" || a.status === "runtime" || a.status === "timeout";
+      const best = k.rubric.map((list, j) => {
+        const found = list.filter(it => new RegExp(it.re, it.flags || "").test(code));
+        const fCode = list.length ? found.length / list.length : 0;
+        const fOut = ran ? lineMatch(a.output, exps[j] ?? exps[0]) : 0;
+        return { j, fCode, fOut, score: 0.5 * fCode + 0.5 * fOut, missingParts: list.filter(it => !found.includes(it)).map(it => it.label || it.re) };
+      }).sort((x, y) => y.score - x.score)[0];
+      const optName = exps.length > 1 ? `Option ${String.fromCharCode(65 + best.j)}: ` : "";
+      if (marks && best.fCode < 0.5) {
+        // output matches, but most of the program is missing: don't trust it blindly
+        marks = Math.round(m * 0.9 * best.fCode * 4) / 4;   // judged on the code only; check it and adjust if the program is genuine
+        notes.push(`⚠ output matches but code has only ${Math.round(best.fCode * 100)}% of the key parts — marked on the code only, please check`);
+      } else if (!marks) {
+        marks = Math.min(Math.round(m * best.score * 4) / 4, Math.round(m * 0.9 * 4) / 4);   // never full marks without the right output
+        notes.push(`partial ${optName}code ${Math.round(best.fCode * 100)}%, output ${Math.round(best.fOut * 100)}%` + (best.missingParts.length ? ` (missing: ${best.missingParts.slice(0, 4).join(", ")}${best.missingParts.length > 4 ? "…" : ""})` : ""));
+      }
+    } else if (!marks && k.partial && attempted) {
+      marks = Math.round(m * k.partial * 100) / 100;
+      notes.push(`output not matching: ${k.partial * 100}% for the attempt`);
+    }
     const opt = exps.length > 1 && outOk ? `solved Option ${String.fromCharCode(65 + hit)}` : "";
-    return { marks, flag: [opt, !outOk && attempted && k.partial && `output not matching: ${k.partial * 100}% for the attempt`, hardcoded && "possible hard-coded output", missing.length && "missing: " + missing.join(", "), a.editedAfterRun && "code edited after last run"].filter(Boolean).join("; ") };
+    return { marks, flag: [opt, ...notes, hardcoded && "possible hard-coded output", missing.length && "missing: " + missing.join(", "), a.editedAfterRun && "code edited after last run"].filter(Boolean).join("; ") };
   }
   return { marks: 0 };
 }
@@ -609,7 +664,9 @@ export function reviewHTML(review) {
 
 function showDetail(host, t, s, refresh) {
   const a = s.answers || {};
-  const codeBlocks = t.questions.filter(q => q.type === "code" && a[q.id]).map(q => `<div class="label">Code for ${esc(q.id)} (${a[q.id].runs || 0} runs)</div><pre class="codebox">${highlightJava(a[q.id].code || "")}</pre>`).join("");
+  const codeBlocks = t.questions.filter(q => q.type === "code" && a[q.id]).map(q => `<div class="label">Code for ${esc(q.id)} (${a[q.id].runs || 0} runs)</div><pre class="codebox">${highlightJava(a[q.id].code || "")}</pre>
+    <div class="btn-row" style="margin:-.3rem 0 1rem"><button class="small rerun" data-q="${esc(q.id)}">▶ Re-run this code now</button><span class="small muted">Runs it again in your browser to test it.</span></div>
+    <pre class="out rerun-out" data-q="${esc(q.id)}" hidden></pre>`).join("");
   host.innerHTML = `<div class="card"><div style="display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap"><h3 style="margin:0">${esc(s.name)} — roll ${esc(s.roll)} · ${s.auto.score} / ${s.auto.total}</h3>
       <button class="small" id="d-close">Close</button></div>
     <p class="small muted">Started ${s.startedAt ? new Date(s.startedAt).toLocaleString() : "?"} · Submitted ${s.submittedAt ? new Date(s.submittedAt).toLocaleString() : "?"} · left the test ${s.tabSwitches || 0}× · paste tries ${s.pasteBlocked || 0}</p>
@@ -640,6 +697,19 @@ function showDetail(host, t, s, refresh) {
     ${codeBlocks}</div>`;
   host.scrollIntoView({ behavior: "smooth" });
   host.querySelector("#d-close").onclick = () => { host.innerHTML = ""; };
+  host.querySelectorAll(".rerun").forEach(btn => btn.onclick = async () => {
+    const qid = btn.dataset.q, out = host.querySelector(`.rerun-out[data-q="${qid}"]`);
+    btn.disabled = true; out.hidden = false; out.textContent = "Running…";
+    try {
+      const r = await runJava(a[qid].code || "", ph => { out.textContent = { loading: "Starting Java…", "compiling-first": "Preparing Java (first time can take a minute)…", compiling: "Compiling…", running: "Running…", server: "Running…" }[ph] || out.textContent; });
+      const k = (await getKey(t.id))?.questions?.[qid];
+      const exps = [].concat(k?.expected ?? []);
+      const hit = r.status === "ok" ? exps.findIndex(e => outputsMatch(r.output, e)) : -1;
+      out.textContent = (r.output || "(no output)") + "\n\n" + (r.status === "compile" ? "✗ Does not compile." : r.status !== "ok" ? `✗ Stopped with an error (${r.status}).` :
+        hit >= 0 ? `✓ Output matches${exps.length > 1 ? " Option " + String.fromCharCode(65 + hit) : ""}.` : "✗ Output does not match the expected output.");
+    } catch (e) { out.textContent = "Could not run: " + e.message; }
+    btn.disabled = false;
+  });
   host.querySelector("#d-save").onclick = async () => {
     const override = { ...(s.override || {}) };
     host.querySelectorAll(".ov").forEach(inp => {
