@@ -65,9 +65,14 @@ function devRules(coll, id, data, d) {
   const t = d.tests?.[data.testId];
   if (coll === "starts") {
     if (!t || !t.open) deny("test not open");
+    if (t.opensAtMs && Date.now() < t.opensAtMs) deny("not open yet");
     if (data.session !== t.startedAt) deny("wrong session");
     if (t.lateUntilMs != null && Date.now() > t.lateUntilMs) deny("entry closed");
     if (t.codeRequired && String(data.code) !== String(d.testCodes?.[data.testId]?.code)) deny("wrong code");
+  }
+  if (coll === "hintUses") {
+    if (!t || !t.open) deny("test not open");
+    if (d.hintUses?.[id]) deny("hint already recorded");
   }
   if (coll === "submissions" && !d.submissions?.[id]) {
     if (!t || !t.open) deny("test not open");
@@ -79,7 +84,16 @@ function devRules(coll, id, data, d) {
 
 const db = {
   async get(coll, id) {
-    if (DEV) { const d = local.load(); return d[coll]?.[id] ? { id, ...unpackNested(d[coll][id]) } : null; }
+    if (DEV) {
+      const d = local.load(), v = d[coll]?.[id];
+      if (coll === "testHints" && v && !store.isFaculty && !d.hintUses?.[`${id}_${store.user.uid}`]) {
+        const e = new Error("permission-denied: take the hint first"); e.code = "permission-denied"; throw e;
+      }
+      if (coll === "tests" && v && !store.isFaculty && (!v.open || (v.opensAtMs && Date.now() < v.opensAtMs))) {
+        const e = new Error("permission-denied: test not open yet"); e.code = "permission-denied"; throw e;
+      }
+      return v ? { id, ...unpackNested(v) } : null;
+    }
     const s = await fb.F.getDoc(fb.F.doc(fb.db, coll, id));
     return s.exists() ? { id: s.id, ...fromFs(s.data()) } : null;
   },
@@ -207,6 +221,15 @@ export function trackTime(topicId, seconds) {
 
 // ---------- tests (student side) ----------
 export const listOpenTests = () => db.query("tests", [["open", "==", true]]);
+// Public list of live and scheduled tests (title and times only), kept by the faculty dashboard.
+// Students read this list; the questions themselves can't be read until the opening time.
+export async function listLiveIndex() {
+  const s = (await db.get("settings", "public").catch(() => null)) || {};
+  return Object.entries(s.liveTests || {}).filter(([, v]) => v).map(([id, v]) => ({ id, ...v }));
+}
+export const publishIndex = t => db.set("settings", "public", { liveTests: { [t.id]: {
+  title: t.title, n: t.pick || t.questions.length, opensAtMs: t.opensAtMs || null, endsAtMs: t.endsAtMs || null } } });
+export const removeIndex = id => db.set("settings", "public", { liveTests: { [id]: null } });
 export const getTest = id => db.get("tests", id);
 export const mySubmissions = () => db.query("submissions", [["uid", "==", store.user.uid]]);
 export function submitTest(testId, data) {
@@ -221,7 +244,28 @@ export const getKey = id => db.get("testKeys", id);
 // The answer key is saved first, so a test never appears without its key.
 export async function saveTest(id, pub, key) {
   await db.set("testKeys", id, key, false);
+  // Hints live in their own documents: a student can read one only after the database
+  // has recorded that student taking it (see firestore.rules), so they can't be peeked at.
+  for (const [qid, k] of Object.entries(key.questions || {})) {
+    if (k.hint) await db.set("testHints", `${id}_${qid}`, { testId: id, qid, hint: k.hint }, false);
+  }
   await db.set("tests", id, pub, false);
+}
+// Student: record taking a hint (the deduction), then read it.
+export async function takeHint(testId, qid) {
+  const id = `${testId}_${qid}_${store.user.uid}`;
+  try { await db.set("hintUses", id, { uid: store.user.uid, testId, qid, at: "__now__" }, false); }
+  catch (e) { /* already taken earlier (e.g. on another device): just read it again */ }
+  return (await db.get("testHints", `${testId}_${qid}`))?.hint || "";
+}
+// (used by the automated tests: a direct read that a student could try from developer tools)
+export const peekHint = (testId, qid) => db.get("testHints", `${testId}_${qid}`).then(d => d?.hint || "");
+// Faculty: which students took which hints in a test → { uid: Set(qid) }
+export async function hintUsesOf(testId) {
+  const rows = await db.query("hintUses", [["testId", "==", testId]]).catch(() => []);
+  const m = {};
+  rows.forEach(r => { (m[r.uid] = m[r.uid] || new Set()).add(r.qid); });
+  return m;
 }
 export const updateTest = (id, fields) => db.set("tests", id, fields);
 export const listSubmissions = testId => db.query("submissions", [["testId", "==", testId]]);

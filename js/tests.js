@@ -1,6 +1,6 @@
 // Student side of tests: list, take (with integrity rules), submit, see published results
 import { esc, el, toast, fillTemplateHTML, pickQuestions, textCanvas, htmlToText } from "./ui.js";
-import { store, listOpenTests, getTest, mySubmissions, submitTest, setLive, loadExamState, saveExamState, clearExamState, getStart, saveStart, deviceId } from "./store.js";
+import { store, listLiveIndex, getTest, mySubmissions, submitTest, setLive, loadExamState, saveExamState, clearExamState, getStart, saveStart, deviceId, takeHint } from "./store.js";
 import { runJava, warmUp, primeCompiler } from "./runner.js";
 import { createEditor } from "./editor.js";
 import { phaseText } from "./topic.js";
@@ -11,17 +11,29 @@ let cleanup = () => {};
 
 const hhmm = iso => new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
+let listTimer = null;
+const countdown = ms => { const s = Math.max(0, Math.round(ms / 1000)); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60;
+  return (h ? h + "h " : "") + String(m).padStart(h ? 2 : 1, "0") + "m " + String(x).padStart(2, "0") + "s"; };
+const whenText = ms => new Date(ms).toLocaleString([], { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+
 export async function renderTests(app) {
   stopExam();
-  const [open, subs] = await Promise.all([listOpenTests(), mySubmissions()]);
+  const [index, subs] = await Promise.all([listLiveIndex(), mySubmissions()]);
   const done = new Set(subs.map(s => s.testId));
+  const now = Date.now();
+  const open = index.filter(t => !t.endsAtMs || now < t.endsAtMs + 120000)
+    .sort((a, b) => (a.opensAtMs || 0) - (b.opensAtMs || 0));
   app.innerHTML = `<div class="page">
-    <h1>Tests</h1><p class="lead">A test appears here only while it is live. You can submit each test once.</p>
-    <h2>Live now</h2>
-    ${open.length ? open.map(t => `<div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:1rem">
-      <div><h3 style="margin:0">${esc(t.title)}</h3><span class="muted small">${t.pick || t.questions.length} questions${t.endsAt ? ` · ends at ${hhmm(t.endsAt)}` : ""}</span></div>
-      ${done.has(t.id) ? `<span class="pill ok">Submitted</span>` : `<a class="btn btn-primary" href="#/test/${encodeURIComponent(t.id)}">Start →</a>`}
-    </div>`).join("") : `<p class="muted">No test is live right now. Wait for your teacher to start it, then reload this page.</p>`}
+    <h1>Tests</h1><p class="lead">Live and upcoming tests appear here. You can submit each test once.</p>
+    <h2>Live and upcoming</h2>
+    ${open.length ? open.map(t => {
+      const later = t.opensAtMs && now < t.opensAtMs;
+      return `<div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap">
+      <div><h3 style="margin:0">${esc(t.title)}</h3><span class="muted small">${t.n} questions${later ? ` · opens <b>${whenText(t.opensAtMs)}</b>` : ""}${t.endsAtMs ? ` · ends at ${hhmm(new Date(t.endsAtMs).toISOString())}` : ""}</span></div>
+      ${done.has(t.id) ? `<span class="pill ok">Submitted</span>`
+        : later ? `<div style="text-align:right"><span class="pill blue">Starts in <b class="cd" data-at="${t.opensAtMs}">${countdown(t.opensAtMs - now)}</b></span><br><span class="small muted">The Start button appears here at the opening time.</span></div>`
+        : `<a class="btn btn-primary" href="#/test/${encodeURIComponent(t.id)}">Start →</a>`}
+    </div>`; }).join("") : `<p class="muted">No test is live or scheduled right now.</p>`}
     <h2>My results</h2>
     ${subs.length ? subs.map((s, i) => `<div class="card">
       <div style="display:flex;justify-content:space-between;gap:1rem;align-items:center;flex-wrap:wrap">
@@ -34,6 +46,14 @@ export async function renderTests(app) {
       ${s.released && s.review ? `<div class="btn-row"><button class="small showrev" data-i="${i}">Show my answers</button></div><div class="rev" data-i="${i}" hidden>${reviewHTML(s.review)}</div>` : ""}
     </div>`).join("") : `<p class="muted">You have not submitted any test yet.</p>`}
   </div>`;
+  // live countdown; the page refreshes itself when a test opens
+  clearInterval(listTimer);
+  if (app.querySelector(".cd")) listTimer = setInterval(() => {
+    if (!document.body.contains(app) || location.hash !== "#/tests") return clearInterval(listTimer);
+    let opened = false;
+    app.querySelectorAll(".cd").forEach(el => { const left = +el.dataset.at - Date.now(); if (left <= 0) opened = true; else el.textContent = countdown(left); });
+    if (opened) { clearInterval(listTimer); setTimeout(() => renderTests(app), 1500); }
+  }, 1000);
   app.querySelectorAll(".showrev").forEach(b => b.onclick = () => {
     const r = app.querySelector(`.rev[data-i="${b.dataset.i}"]`);
     r.hidden = !r.hidden;
@@ -43,6 +63,7 @@ export async function renderTests(app) {
 
 export function stopExam() {
   clearInterval(tick);
+  clearInterval(listTimer);
   cleanup();
   cleanup = () => {};
   window.onbeforeunload = null;
@@ -57,7 +78,11 @@ export async function renderTakeTest(app, id) {
   }
   let t;
   try { t = await getTest(id); } catch { t = null; }
-  if (!t || !t.open) { app.innerHTML = `<div class="page"><div class="warn">This test is not live. <a href="#/tests">Back to tests</a></div></div>`; return; }
+  if (!t || !t.open) {
+    const sch = (await listLiveIndex().catch(() => [])).find(x => x.id === id && x.opensAtMs && Date.now() < x.opensAtMs);
+    app.innerHTML = `<div class="page"><div class="warn">${sch ? `This test opens at <b>${whenText(sch.opensAtMs)}</b>. Please wait on the Tests page; the Start button appears there at that time.` : "This test is not live."} <a href="#/tests">Back to tests</a></div></div>`;
+    return;
+  }
   if (t.endsAt && Date.now() > new Date(t.endsAt).getTime()) { app.innerHTML = `<div class="page"><div class="warn">Time for this test is over. <a href="#/tests">Back to tests</a></div></div>`; return; }
 
   const retake = (t.retakes && t.retakes[store.user.uid]) || 0;
@@ -214,11 +239,54 @@ function renderPaper(app, t, k, state) {
       ins.forEach((inp, j) => { inp.value = (a || [])[j] || ""; inp.oninput = () => { state.answers[q.id] = ins.map(x => x.value); save(); }; });
     } else if (q.type === "code") {
       if (q.mustUse?.length) card.insertAdjacentHTML("beforeend", `<div class="musts"><span class="small muted">Your code must use:</span>${q.mustUse.map(m => `<code>${esc(m)}</code>`).join("")}</div>`);
-      if (q.expected) { card.insertAdjacentHTML("beforeend", `<div class="label">Expected output</div>`); card.appendChild(textCanvas(q.expected, { mono: true, width: w, size: 14, bg: "#f8f7f3", pad: 12 })); }
+      if (q.manual) card.insertAdjacentHTML("beforeend", `<div class="warn" style="margin:.6rem 0">✍️ Your teacher will check this program personally. Write it and Run it; the output can differ slightly from the sample.</div>`);
+      if (q.expected) {
+        const exps = [].concat(q.expected);
+        exps.forEach((e, j) => {
+          card.insertAdjacentHTML("beforeend", `<div class="label">${q.manual ? "Sample output" : "Expected output"}${exps.length > 1 ? ` — Option ${String.fromCharCode(65 + j)}` : ""}</div>`);
+          card.appendChild(textCanvas(e, { mono: true, width: w, size: 14, bg: "#f8f7f3", pad: 12 }));
+        });
+      }
       card.insertAdjacentHTML("beforeend", `<div class="label">Your code</div><div class="ed"></div>
         <div class="btn-row"><button class="btn-run">▶ Run</button><span class="status run"></span></div>
         <div class="label">Output of your last run (this is what gets graded)</div><pre class="outbox out">${esc(a?.output || "(not run yet)")}</pre>`);
       createEditor(card.querySelector(".ed"), a?.code || q.starter || "public class Main {\n    public static void main(String[] args) {\n        \n    }\n}\n").then(ed => editors[q.id] = ed);
+      if (q.hasHint) {
+        const pen = q.hintPenalty ?? 30;
+        const hb = el(`<div class="hint-area" style="margin-top:.8rem"></div>`);
+        card.appendChild(hb);
+        const showHint = text => {
+          hb.innerHTML = `<div class="label">💡 Hint <span class="small muted">(−${pen}% of this question's marks)</span></div>`;
+          // a hint can hold one part per option, each starting with a line "// ===== Option A ..."
+          const parts = text.split(/^(?=\/\/ =+ Option [A-Z])/m).map(s => s.trim()).filter(Boolean);
+          parts.forEach(part => {
+            const name = (part.match(/^\/\/ =+ (Option [A-Z])/) || [])[1] || "";
+            hb.appendChild(textCanvas(part, { mono: true, width: w, size: 14, bg: "#fff8e1", pad: 12 }));
+            const put = el(`<button class="small" style="margin:.4rem 0 .8rem">Put the ${name ? name + " " : ""}hint code in my editor</button>`);
+            put.onclick = () => {
+              const ed = editors[q.id]; if (!ed) return;
+              if (ed.getValue().trim() && !confirm("Replace the code in your editor with this hint code?")) return;
+              ed.setValue(part.replace(/^\/\/ =+ Option [A-Z][^\n]*\n/, "")); log(`hint code put in editor (Q${i + 1}${name ? ", " + name : ""})`);
+            };
+            hb.appendChild(put);
+          });
+        };
+        if (state.hints?.[q.id] != null) showHint(state.hints[q.id]);
+        else {
+          const b = el(`<button class="small" style="border-color:#e0a800">💡 Show hint (−${pen}% marks for this question)</button>`);
+          b.onclick = async () => {
+            if (!confirm(`Show the hint for this question?\n\n${pen}% of this question's marks will be deducted, even if you don't use it. This can't be undone.`)) return;
+            b.disabled = true; b.textContent = "Loading hint…";
+            try {
+              const text = await takeHint(t.id, q.id);
+              state.hints = { ...(state.hints || {}), [q.id]: text };
+              log(`took the hint for question ${i + 1}`); save();
+              showHint(text);
+            } catch (e) { b.disabled = false; b.textContent = `💡 Show hint (−${pen}% marks for this question)`; toast("Could not load the hint: " + (e.code || e.message)); }
+          };
+          hb.appendChild(b);
+        }
+      }
       card.querySelector(".btn-run").onclick = async e => {
         const ed = editors[q.id]; if (!ed) return;
         const b = e.currentTarget; b.disabled = true;
@@ -237,7 +305,7 @@ function renderPaper(app, t, k, state) {
   const captureEditor = q => {
     const ed = editors[q.id]; if (!ed) return;
     const cur = state.answers[q.id] || {};
-    if (cur.code !== ed.getValue()) state.answers[q.id] = { ...cur, code: ed.getValue(), editedAfterRun: true };
+    if (cur.code !== ed.getValue()) state.answers[q.id] = { ...cur, code: ed.getValue(), editedAfterRun: (cur.runs || 0) > 0 };
   };
   // the faculty's "seconds per question" is the minimum; a question with more time of its own keeps it
   const qTime = q => timedQs ? Math.max(t.perQuestionSec, q.timeSec || 0) : null;

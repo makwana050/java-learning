@@ -93,13 +93,20 @@ export function pickQuestions(t, uid) {
   const retake = (t.retakes && t.retakes[uid]) || 0;
   const rnd = seededRandom(uid + "|" + t.id + "|" + (t.startedAt || "") + (retake ? "|retake" + retake : ""));
   let ids = t.questions.map(q => q.id);
+  // Question sets (e.g. Set 1 / Set 2): each student is given one whole set, chosen at random
+  const sets = [...new Set(t.questions.map(q => q.set).filter(x => x != null))].sort((a, b) => a - b);
+  let set = null;
+  if (sets.length) {
+    set = sets[Math.floor(rnd() * sets.length)];
+    ids = t.questions.filter(q => q.set === set).map(q => q.id);
+  }
   if (t.shuffle !== false || t.pick) ids = shuffle(ids, rnd);
   if (t.pick) ids = ids.slice(0, t.pick);
   const optionOrder = {};
   t.questions.forEach(q => {
     if (q.type === "mcq") optionOrder[q.id] = t.shuffle !== false ? shuffle(q.options.map((_, i) => i), rnd) : q.options.map((_, i) => i);
   });
-  return { ids, optionOrder };
+  return { ids, optionOrder, set };
 }
 
 // ---------- exam helpers: draw text into a canvas (not selectable, not readable by page-reading tools) ----------

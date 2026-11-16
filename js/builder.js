@@ -28,7 +28,7 @@ export function toEditable(pub, key) {
       if (q.type === "mcq") o.answer = k.answer ?? 0;
       if (q.type === "output") o.answer = k.answer || [""];
       if (q.type === "fill") o.answer = k.answer || [];
-      if (q.type === "code") { o.expected = k.expected ?? q.expected ?? ""; o.mustUse = k.mustUse || q.mustUse || []; o.showExpected = q.expected != null; o.solution = k.solution || ""; }
+      if (q.type === "code") { o.expected = [].concat(k.expected ?? q.expected ?? "").join("\n--- OR ---\n"); o.partial = k.partial; o.mustUse = k.mustUse || q.mustUse || []; o.showExpected = q.expected != null; o.solution = k.solution || ""; o.hint = k.hint || ""; o.hintPenalty = k.hintPenalty ?? q.hintPenalty ?? 30; delete o.hasHint; }
       return o;
     }),
   };
@@ -44,14 +44,19 @@ export function toJSON(t) {
       const o = { id: q.id, type: q.type, marks: +q.marks || 1, q: q.q };
       if (q.code) o.code = q.code;
       if (+q.timeSec) o.timeSec = +q.timeSec;
+      if (q.set != null) o.set = +q.set;
+      if (q.manual) o.manual = true;
       if (q.explain) o.explain = q.explain;
       if (q.type === "mcq") { o.options = q.options; o.answer = +q.answer; }
       if (q.type === "output") o.answer = (q.answer || []).filter((a, i) => i === 0 || a.trim());
       if (q.type === "fill") { o.template = q.template; o.answer = q.answer; }
       if (q.type === "code") {
-        o.expected = q.expected; if (q.starter) o.starter = q.starter;
+        const ex = String(q.expected || "").split(/\n--- OR ---\n/);
+        o.expected = ex.length > 1 ? ex : ex[0]; if (q.starter) o.starter = q.starter;
+        if (q.partial != null) o.partial = q.partial;
         if (q.mustUse?.length) o.mustUse = q.mustUse; if (q.showExpected === false) o.showExpected = false;
         if (q.solution) o.solution = q.solution;
+        if (q.hint && q.hint.trim()) { o.hint = q.hint; o.hintPenalty = q.hintPenalty == null ? 30 : +q.hintPenalty; }
       }
       return o;
     }),
@@ -286,12 +291,16 @@ export function renderBuilder(host, opts) {
         <label>Expected output (graded against the student's last run)<textarea class="e-exp mono" rows="4" spellcheck="false">${esc(q.expected || "")}</textarea></label>
         <label class="check"><input type="checkbox" class="e-show" ${q.showExpected !== false ? "checked" : ""}> Show the expected output to students</label>
         <label>Code students start with (optional)<textarea class="e-start mono" rows="4" spellcheck="false">${esc(q.starter || "")}</textarea></label>
-        <label>Code must contain <span class="muted small">(comma-separated, e.g. <code>printf, %.2f</code>)</span><input class="e-must mono" value="${esc((q.mustUse || []).join(", "))}"></label>`;
+        <label>Code must contain <span class="muted small">(comma-separated, e.g. <code>printf, %.2f</code>)</span><input class="e-must mono" value="${esc((q.mustUse || []).join(", "))}"></label>
+        <label>Hint for students <span class="muted small">(optional, e.g. half of the program; hidden until a student asks for it)</span><textarea class="e-hint mono" rows="6" spellcheck="false">${esc(q.hint || "")}</textarea></label>
+        <label>Marks deducted for taking the hint (% of this question)<input type="number" class="e-hpen" min="0" max="100" value="${q.hintPenalty ?? 30}" style="width:7ch"></label>`;
       const sol = tbox.querySelector(".e-sol"); sol.oninput = e => { q.solution = e.target.value; }; sol.onkeydown = tab;
       tbox.querySelector(".e-exp").oninput = e => { q.expected = e.target.value; };
       tbox.querySelector(".e-show").onchange = e => { q.showExpected = e.target.checked; };
       const st0 = tbox.querySelector(".e-start"); st0.oninput = e => { q.starter = e.target.value; }; st0.onkeydown = tab;
       tbox.querySelector(".e-must").oninput = e => { q.mustUse = e.target.value.split(",").map(s => s.trim()).filter(Boolean); };
+      const hb = tbox.querySelector(".e-hint"); hb.oninput = e => { q.hint = e.target.value; }; hb.onkeydown = tab;
+      tbox.querySelector(".e-hpen").oninput = e => { q.hintPenalty = Math.min(100, Math.max(0, +e.target.value || 0)); };
       tbox.querySelector(".e-run").onclick = async ev => {
         const st = tbox.querySelector(".e-st"); ev.target.disabled = true;
         const r = await runJava(q.solution || "", (ph, s) => st.textContent = phaseTextSafe(ph, s));

@@ -2,7 +2,7 @@ import { testRunServer } from "./runner.js";
 // Faculty (admin) dashboard: overview, tests (create/edit/run/grade), live monitor, gradebook, students, settings
 import { esc, el, toast, fmtTime, downloadCSV, normBlank, highlightJava, pickQuestions } from "./ui.js";
 import { store, listTests, getKey, saveTest, updateTest, listSubmissions, updateSubmission, listAllProgress, getAccess, saveAccess, isAllowed,
-  deleteTest, deleteSubmission, submissionsOf, listAllSubmissions, progressOf, saveSettings, loadSettings, listLive, clearLive, setTestCode, getTestCode } from "./store.js";
+  deleteTest, deleteSubmission, submissionsOf, listAllSubmissions, progressOf, saveSettings, loadSettings, listLive, clearLive, setTestCode, getTestCode, publishIndex, removeIndex, hintUsesOf } from "./store.js";
 import { ALLOWED_DOMAIN, FACULTY_EMAILS } from "./config.js";
 import { outputsMatch, codeOnly, missingMust } from "./runner.js";
 import { renderBuilder, toEditable, toJSON } from "./builder.js";
@@ -43,7 +43,8 @@ async function loadAllResults() {
   const tests = await listTests();
   const out = [];
   for (const t of tests) {
-    const [subs, key] = await Promise.all([listSubmissions(t.id), getKey(t.id)]);
+    const [subs0, key] = await Promise.all([listSubmissions(t.id), getKey(t.id)]);
+    const subs = await withHints(t, subs0);
     out.push({ t, key, subs: subs.map(s => ({ ...s, auto: gradeSubmission(t, key, s) })) });
   }
   return out.sort((a, b) => String(b.t.startedAt || b.t.createdAt).localeCompare(String(a.t.startedAt || a.t.createdAt)));
@@ -151,7 +152,11 @@ async function testsTab(body) {
     ${tests.map(t => `<tr data-id="${esc(t.id)}"><td><b>${esc(t.title)}</b><br><code class="small">${esc(t.id)}</code>
         <br><span class="small muted">${counts[t.id]} submitted</span></td>
       <td class="num">${t.pick ? `${t.pick} of ${t.questions.length}<br><span class="small muted">random per student</span>` : t.questions.length}</td>
-      <td>${t.open
+      <td>${t.open && t.opensAtMs && Date.now() < t.opensAtMs
+        ? `<span class="pill blue">⏰ SCHEDULED</span> <span class="small">opens <b>${fmtWhen(t.opensAtMs)}</b>${t.endsAtMs ? `, ends ${fmtClock(new Date(t.endsAtMs).toISOString())}` : ""}</span><br>
+           <span class="small muted">It opens by itself. Students see a countdown on their Tests page.</span><br>
+           <button class="btn-primary small live" style="margin-top:.3rem">👁 Live monitor</button> <button class="small toggle" style="margin-top:.3rem">✕ Cancel schedule</button>`
+        : t.open
         ? `<span class="pill ok"><span class="live-dot"></span>LIVE</span> <span class="small">started ${fmtClock(t.startedAt)}${t.endsAt ? `, ends <b>${fmtClock(t.endsAt)}</b>` : ""}</span><br>
            <button class="btn-primary small live" style="margin-top:.3rem">👁 Live monitor</button> <button class="small extend" style="margin-top:.3rem">+5 min</button> <button class="small toggle" style="margin-top:.3rem">■ Stop test</button>`
         : `<span class="pill">Not running</span>
@@ -166,6 +171,8 @@ async function testsTab(body) {
              <span>Require full screen</span><input type="checkbox" class="fs" ${t.requireFullscreen ? "checked" : ""}>
              <span>Start code <span class="muted">(you show it on screen)</span></span><input type="checkbox" class="code" ${t.codeRequired !== false ? "checked" : ""}>
              <span>Entry closes after (min) <span class="muted">(0 = never)</span></span><input type="number" class="late" min="0" value="${t.lateMin ?? 10}" style="width:6ch">
+             <span>Start</span><span><select class="when" style="font:inherit"><option value="now">Now</option><option value="at">At a set time…</option></select>
+               <input type="datetime-local" class="at" hidden style="font:inherit"></span>
            </div>
            <button class="btn-run small start">▶ Start now</button>`}</td>
       <td>${t.released ? '<span class="pill blue">Published</span>' : '<span class="pill">Hidden</span>'}<br>
@@ -196,6 +203,13 @@ async function testsTab(body) {
   };
   body.querySelectorAll("tr[data-id]").forEach(tr => {
     const t = tests.find(x => x.id === tr.dataset.id);
+    const when = tr.querySelector(".when"), at = tr.querySelector(".at"), startBtn = tr.querySelector(".start");
+    if (when) when.onchange = () => {
+      const sched = when.value === "at";
+      at.hidden = !sched;
+      if (sched && !at.value) { const d = new Date(Date.now() + 3600000); d.setMinutes(0, 0, 0); at.value = toLocalInput(d); }
+      startBtn.textContent = sched ? "⏰ Schedule" : "▶ Start now";
+    };
     tr.querySelector(".start")?.addEventListener("click", async () => {
       const num = (sel, f = parseFloat) => Math.max(0, f(tr.querySelector(sel).value) || 0);
       const one = tr.querySelector(".layout").value === "one";
@@ -203,28 +217,41 @@ async function testsTab(body) {
       const fs = tr.querySelector(".fs").checked;
       const useCode = tr.querySelector(".code").checked, late = num(".late", v => parseInt(v, 10));
       const n = t.pick || t.questions.length;
+      const scheduled = tr.querySelector(".when").value === "at";
+      let opens = Date.now();
+      if (scheduled) {
+        const v = tr.querySelector(".at").value;
+        opens = v ? new Date(v).getTime() : NaN;
+        if (!opens || isNaN(opens)) return toast("Choose the date and time the test should open");
+        if (opens < Date.now() + 60000) return toast("Choose a time at least 1 minute from now (or choose Start: Now)");
+        if (opens > Date.now() + 30 * 86400000) return toast("Choose a time within the next 30 days");
+      }
       if (one && pq && d && pq * n > d * 60 && !confirm(`${n} questions × ${pq}s = ${Math.ceil(pq * n / 60)} min, more than the total time of ${d} min. Start anyway?`)) return;
       if (counts[t.id] && !confirm(`${counts[t.id]} student(s) already submitted an earlier run of this test. Their submissions stay, and they will not be able to take it again unless you allow a re-attempt. Continue?`)) return;
-      if (!confirm(`Start "${t.title}" now?\n\nTotal time: ${d ? d + " min" : "no limit"}\nQuestions: ${one ? (pq ? "one at a time, " + pq + " s each" : "one at a time, no time limit per question (they press Next)") : "all on one page"}\nPenalty per leave: ${pen}\nAuto-submit after: ${auto || "never"}\nFull screen: ${fs ? "yes" : "no"}\nStart code: ${useCode ? "yes (shown on the live monitor)" : "no"}\nEntry closes: ${late ? "after " + late + " min" : "never"}`)) return;
-      const now = Date.now();
+      if (!confirm(`${scheduled ? `Schedule "${t.title}" to open automatically on ${fmtWhen(opens)}?` : `Start "${t.title}" now?`}\n\nTotal time: ${d ? d + " min" : "no limit"}\nQuestions: ${one ? (pq ? "one at a time, " + pq + " s each" : "one at a time, no time limit per question (they press Next)") : "all on one page"}\nPenalty per leave: ${pen}\nAuto-submit after: ${auto || "never"}\nFull screen: ${fs ? "yes" : "no"}\nStart code: ${useCode ? "yes (shown on the live monitor)" : "no"}\nEntry closes: ${late ? "after " + late + " min" : "never"}`)) return;
+      const now = opens;
       if (useCode) await setTestCode(t.id, newCode());
-      await updateTest(t.id, { open: true, oneAtATime: one, durationMin: d, perQuestionSec: pq, penaltyPerLeave: pen, autoSubmitAfter: auto, requireFullscreen: fs,
+      await updateTest(t.id, { open: true, opensAtMs: scheduled ? opens : null, oneAtATime: one, durationMin: d, perQuestionSec: pq, penaltyPerLeave: pen, autoSubmitAfter: auto, requireFullscreen: fs,
         codeRequired: useCode, lateMin: late, lateUntilMs: late ? now + late * 60000 : null,
         startedAt: new Date(now).toISOString(), endsAt: d ? new Date(now + d * 60000).toISOString() : null, endsAtMs: d ? now + d * 60000 : null });
-      toast("Test is LIVE — tell students to open the Tests page");
-      await testsTab(body);
       const tt = (await listTests()).find(x => x.id === t.id);
+      await publishIndex(tt);
+      toast(scheduled ? `Scheduled: opens by itself on ${fmtWhen(opens)}` : "Test is LIVE — tell students to open the Tests page");
+      await testsTab(body);
       liveMonitor(body.querySelector("#subs-host"), tt);
     });
     tr.querySelector(".extend")?.addEventListener("click", async () => {
       const base = t.endsAt ? new Date(t.endsAt).getTime() : Date.now();
       await updateTest(t.id, { endsAt: new Date(base + 5 * 60000).toISOString(), endsAtMs: base + 5 * 60000, durationMin: (t.durationMin || 0) + 5 });
+      await publishIndex({ ...t, endsAtMs: base + 5 * 60000 });
       toast("Extended by 5 minutes");
       testsTab(body);
     });
     tr.querySelector(".toggle")?.addEventListener("click", async () => {
-      if (!confirm(`Stop "${t.title}"? Students who have not submitted will not be able to submit.`)) return;
+      const sched = t.opensAtMs && Date.now() < t.opensAtMs;
+      if (!confirm(sched ? `Cancel the schedule for "${t.title}"? It will not open.` : `Stop "${t.title}"? Students who have not submitted will not be able to submit.`)) return;
       await updateTest(t.id, { open: false });
+      await removeIndex(t.id);
       testsTab(body);
     });
     tr.querySelector(".live")?.addEventListener("click", () => liveMonitor(body.querySelector("#subs-host"), t));
@@ -242,6 +269,7 @@ async function testsTab(body) {
     tr.querySelector(".del").onclick = async () => {
       if (!confirm(`Delete the test "${t.title}"?${counts[t.id] ? `\n\n${counts[t.id]} submission(s) will stay in the gradebook, but you won't be able to re-grade them.` : ""}\n\nTip: download the JSON first as a backup.`)) return;
       await deleteTest(t.id);
+      await removeIndex(t.id);
       toast("Test deleted");
       testsTab(body);
     };
@@ -249,6 +277,8 @@ async function testsTab(body) {
 }
 
 const newCode = () => String(Math.floor(1000 + Math.random() * 9000));
+const fmtWhen = ms => new Date(ms).toLocaleString([], { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+const toLocalInput = d => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
 
 // ---------- live monitor ----------
 async function liveMonitor(host, t) {
@@ -257,11 +287,12 @@ async function liveMonitor(host, t) {
   const lm = host.querySelector("#lm"), gate = host.querySelector("#lm-gate");
   const drawGate = async () => {
     const code = t.codeRequired ? (await getTestCode(t.id))?.code : null;
+    const opensLine = t.opensAtMs && Date.now() < t.opensAtMs ? `<b>⏰ Opens by itself at ${fmtWhen(t.opensAtMs)}</b><br>` : "";
     const entry = t.lateUntilMs ? (Date.now() < t.lateUntilMs ? `Entry closes at <b>${fmtClock(new Date(t.lateUntilMs).toISOString())}</b>` : `<b style="color:var(--bad)">Entry closed</b> at ${fmtClock(new Date(t.lateUntilMs).toISOString())}`) : "Entry open until the test ends";
     gate.innerHTML = `<div class="card" style="display:flex;gap:1.5rem;align-items:center;flex-wrap:wrap">
       ${code ? `<div><div class="small muted">START CODE: show this on screen</div><div style="font-family:var(--mono);font-size:3rem;font-weight:800;letter-spacing:.25em;line-height:1.1">${esc(code)}</div></div>
         <button class="small" id="lm-newcode" title="Students who already started are not affected">↻ New code</button>` : `<div class="small muted">No start code for this run.</div>`}
-      <div class="small">${entry}<br><button class="small" id="lm-late" style="margin-top:.3rem">Keep entry open 5 more min</button></div></div>`;
+      <div class="small">${opensLine}${entry}<br><button class="small" id="lm-late" style="margin-top:.3rem">Keep entry open 5 more min</button></div></div>`;
     gate.querySelector("#lm-newcode")?.addEventListener("click", async () => { await setTestCode(t.id, newCode()); toast("New start code set"); drawGate(); });
     gate.querySelector("#lm-late").onclick = async () => {
       const until = Math.max(Date.now(), t.lateUntilMs || 0) + 5 * 60000;
@@ -313,6 +344,8 @@ export function splitTest(json) {
     const p = { id: q.id, type: q.type, q: q.q, marks: q.marks || 1 };
     if (q.code) p.code = q.code;
     if (q.timeSec) p.timeSec = q.timeSec;
+    if (q.set != null) p.set = +q.set;
+    if (q.manual) p.manual = true;   // marked by the faculty, not automatically
     if (q.type === "mcq") {
       if (!Array.isArray(q.options) || !Number.isInteger(q.answer) || q.answer < 0 || q.answer >= q.options.length) throw new Error(`${where}: mcq needs "options" and "answer" (0 = first option)`);
       p.options = q.options; keyQ[q.id] = { answer: q.answer };
@@ -325,10 +358,21 @@ export function splitTest(json) {
       p.template = q.template; keyQ[q.id] = { answer: q.answer.map(a => [].concat(a)) };
     } else if (q.type === "code") {
       if (q.expected == null) throw new Error(`${where}: code question needs "expected" output`);
+      if (Array.isArray(q.expected) && (!q.expected.length || q.expected.some(e => typeof e !== "string"))) throw new Error(`${where}: "expected" must be text, or a list of texts (one per option)`);
       if (q.showExpected !== false) p.expected = q.expected;
       if (q.starter) p.starter = q.starter;
       if (q.mustUse) p.mustUse = q.mustUse;
       keyQ[q.id] = { expected: q.expected, mustUse: q.mustUse || [] };
+      if (q.partial != null) {   // e.g. 0.5 = half marks for an attempt whose output is not right
+        if (!(q.partial >= 0 && q.partial <= 1)) throw new Error(`${where}: "partial" must be between 0 and 1 (0.5 = half marks)`);
+        keyQ[q.id].partial = +q.partial;
+      }
+      if (q.hint) {   // the hint text itself goes only to the key (and the locked hint store), never into the public test
+        const pen = q.hintPenalty == null ? 30 : +q.hintPenalty;
+        if (!(pen >= 0 && pen <= 100)) throw new Error(`${where}: "hintPenalty" must be a percentage from 0 to 100`);
+        p.hasHint = true; p.hintPenalty = pen;
+        keyQ[q.id].hint = q.hint; keyQ[q.id].hintPenalty = pen;
+      }
     } else throw new Error(`${where}: "type" must be mcq, output, fill or code`);
     if (q.explain) keyQ[q.id].explain = q.explain;
     pubQ.push(p);
@@ -336,13 +380,15 @@ export function splitTest(json) {
   return {
     pub: { title: json.title, instructions: json.instructions || "", durationMin: json.durationMin || 0, pick: json.pick || null,
       shuffle: json.shuffle !== false, perQuestionSec: json.perQuestionSec || 0, penaltyPerLeave: json.penaltyPerLeave || 0,
-      autoSubmitAfter: json.autoSubmitAfter || 0, requireFullscreen: !!json.requireFullscreen, questions: pubQ, open: false, released: false, createdAt: "__now__" },
+      autoSubmitAfter: json.autoSubmitAfter || 0, requireFullscreen: !!json.requireFullscreen, questions: pubQ, open: false, released: false, createdAt: "__now__",
+      ...(json.oneAtATime != null ? { oneAtATime: !!json.oneAtATime } : {}) },
     key: { questions: keyQ },
   };
 }
 
 function gradeQuestion(q, k, a) {
   const m = q.marks || 1;
+  if (q.manual) return { marks: 0, flag: a?.code ? "mark by hand (View / adjust)" : "not attempted" };
   if (!k || a == null) return { marks: 0 };
   if (q.type === "mcq") return { marks: a === k.answer ? m : 0 };
   if (q.type === "output") return { marks: k.answer.some(x => outputsMatch(a, x)) ? m : 0 };
@@ -352,11 +398,18 @@ function gradeQuestion(q, k, a) {
   }
   if (q.type === "code") {
     const code = codeOnly(a.code || "");
-    const outOk = a.status === "ok" && outputsMatch(a.output, k.expected);
+    const exps = [].concat(k.expected);                        // one expected output per option
+    const hit = a.status === "ok" ? exps.findIndex(e => outputsMatch(a.output, e)) : -1;
+    const outOk = hit >= 0;
     const missing = missingMust(a.code || "", k.mustUse);
-    const lines = k.expected.split("\n").map(s => s.trim()).filter(Boolean);
+    const lines = (exps[Math.max(0, hit)] || "").split("\n").map(s => s.trim()).filter(Boolean);
     const hardcoded = lines.length > 1 && lines.every(l => code.includes(l));
-    return { marks: outOk && !missing.length ? m : 0, flag: [hardcoded && "possible hard-coded output", missing.length && "missing: " + missing.join(", "), a.editedAfterRun && "code edited after last run"].filter(Boolean).join("; ") };
+    // an attempt = the student ran some code of their own (not just the empty starter)
+    const attempted = (a.runs || 0) > 0 && code.replace(/\s+/g, "").length > 70;
+    let marks = outOk && !missing.length ? m : 0;
+    if (!marks && k.partial && attempted) marks = Math.round(m * k.partial * 100) / 100;
+    const opt = exps.length > 1 && outOk ? `solved Option ${String.fromCharCode(65 + hit)}` : "";
+    return { marks, flag: [opt, !outOk && attempted && k.partial && `output not matching: ${k.partial * 100}% for the attempt`, hardcoded && "possible hard-coded output", missing.length && "missing: " + missing.join(", "), a.editedAfterRun && "code edited after last run"].filter(Boolean).join("; ") };
   }
   return { marks: 0 };
 }
@@ -367,7 +420,8 @@ function answerTexts(q, k, a) {
   if (q.type === "mcq") return [a == null ? "(no answer)" : q.options[a], q.options[k.answer]];
   if (q.type === "output") return [a == null || a === "" ? "(no answer)" : a, (k.answer || [])[0]];
   if (q.type === "fill") return [(a || []).join("  |  ") || "(no answer)", (k.answer || []).map(x => x[0]).join("  |  ")];
-  return [a?.output ?? "(not run)", k.expected];
+  const ex = [].concat(k.expected ?? "");
+  return [a?.output ?? "(not run)", ex.length > 1 ? ex.map((e, i) => `Option ${String.fromCharCode(65 + i)}:\n${e}`).join("\n\n") : ex[0]];
 }
 
 function gradeSubmission(t, key, s) {
@@ -379,13 +433,25 @@ function gradeSubmission(t, key, s) {
     const q = byId[id]; if (!q) return;
     const k = key?.questions?.[id];
     const g = gradeQuestion(q, k, s.answers?.[id]);
-    if (s.override && s.override[id] != null) g.marks = s.override[id];
+    let hintNote = "";
+    const hasOv = s.override && s.override[id] != null;
+    // hand-marked question: your mark is the starting point, and the hint deduction is applied to it
+    if (q.manual && hasOv) { g.marks = +s.override[id]; g.flag = "marked by hand"; }
+    if ((s.hintsTaken || []).includes(id)) {
+      const pen = k?.hintPenalty ?? q.hintPenalty ?? 30;
+      g.marks = Math.round(g.marks * (1 - pen / 100) * 100) / 100;
+      hintNote = `hint taken (−${pen}%)`;
+      flags.push(`Q${i + 1}: ${hintNote}`);
+    }
+    if (hasOv && !q.manual) g.marks = s.override[id];
     per[id] = g.marks; score += g.marks; total += q.marks || 1;
     if (g.flag) flags.push(`Q${i + 1}: ${g.flag}`);
     const [yours, correct] = answerTexts(q, k, s.answers?.[id]);
-    review.push({ n: i + 1, id, q: q.q, code: q.code || "", type: q.type, yours: String(yours ?? ""), correct: String(correct ?? ""), marks: g.marks, max: q.marks || 1, explain: k?.explain || "", secs: s.timeSpent?.[id] ?? null });
+    review.push({ n: i + 1, id, q: q.q, code: q.code || "", type: q.type, yours: String(yours ?? ""), correct: String(correct ?? ""), marks: g.marks, max: q.marks || 1, explain: k?.explain || "", secs: s.timeSpent?.[id] ?? null, hint: hintNote, manual: !!q.manual });
   });
-  if (t.pick && s.picked && pickQuestions(t, s.uid).ids.join() !== s.picked.join()) flags.push("question set doesn't match the one assigned");
+  const hasSets = t.questions.some(q => q.set != null);
+  if (hasSets) { const st = byId[ids[0]]?.set; if (st != null) flags.unshift(`Set ${st}`); }
+  if ((t.pick || hasSets) && s.picked && pickQuestions(t, s.uid).ids.join() !== s.picked.join()) flags.push("question set doesn't match the one assigned");
   if ((s.devices || 1) > 1) flags.push(`⚠ opened on ${s.devices} devices`);
   if (s.tabSwitches) flags.push(`left the page ${s.tabSwitches}×`);
   if (s.pasteBlocked) flags.push(`tried to paste ${s.pasteBlocked}×`);
@@ -394,6 +460,13 @@ function gradeSubmission(t, key, s) {
   if (s.autoReason) flags.push("auto-submitted: " + s.autoReason);
   const final = Math.max(0, Math.min(total, Math.round((raw - penalty + (+s.adjust || 0)) * 100) / 100));
   return { per, raw, penalty, score: final, total, flags, review };
+}
+
+// Adds to each submission the hints its student took (recorded by the database, not by the student's browser).
+async function withHints(t, subs) {
+  if (!t.questions.some(q => q.hasHint)) return subs;
+  const hu = await hintUsesOf(t.id);
+  return subs.map(s => ({ ...s, hintsTaken: [...(hu[s.uid] || [])] }));
 }
 
 // Deletes a student's response so they can take the test again (with a fresh question set).
@@ -408,7 +481,8 @@ async function deleteResponse(t, s) {
 async function submissionsView(host, t, body) {
   clearInterval(liveTimer);
   host.innerHTML = `<p class="muted">Loading submissions…</p>`;
-  const [subs, key] = await Promise.all([listSubmissions(t.id), getKey(t.id)]);
+  const [subs0, key] = await Promise.all([listSubmissions(t.id), getKey(t.id)]);
+  const subs = await withHints(t, subs0);
   subs.sort((a, b) => String(a.roll).localeCompare(String(b.roll), undefined, { numeric: true }));
   const graded = subs.map(s => ({ ...s, auto: gradeSubmission(t, key, s) }));
   const codeQs = t.questions.filter(q => q.type === "code");
@@ -526,7 +600,7 @@ function analysisHTML(t, key, graded) {
 }
 
 export function reviewHTML(review) {
-  return review.map(r => `<div class="q"><b>Q${r.n}.</b> <span class="pill ${r.marks >= r.max ? "ok" : r.marks > 0 ? "blue" : "bad"}">${r.marks} / ${r.max}</span>${r.secs != null ? ` <span class="small muted">${r.secs}s</span>` : ""} ${r.q}
+  return review.map(r => `<div class="q"><b>Q${r.n}.</b> <span class="pill ${r.marks >= r.max ? "ok" : r.marks > 0 ? "blue" : "bad"}">${r.marks} / ${r.max}</span>${r.secs != null ? ` <span class="small muted">${r.secs}s</span>` : ""}${r.hint ? ` <span class="pill" style="background:#fff3cd;color:#7a5b00">💡 ${esc(r.hint)}</span>` : ""} ${r.q}
     ${r.code ? `<pre class="codebox" style="margin:.5rem 0">${highlightJava(r.code)}</pre>` : ""}
     <div class="split"><div><div class="label">Answer given</div><pre class="outbox ${r.marks >= r.max ? "ok" : "bad"}">${esc(r.yours)}</pre></div>
     <div><div class="label">Correct answer</div><pre class="outbox">${esc(r.correct)}</pre></div></div>
@@ -558,9 +632,11 @@ function showDetail(host, t, s, refresh) {
     ${s.events?.length ? `<h3>Activity log</h3><table class="tbl" style="margin-bottom:1rem"><thead><tr><th class="num">Time into test</th><th>Event</th></tr></thead><tbody>
       ${s.events.map(e => `<tr><td class="num">${Math.floor(e.at / 60)}:${String(e.at % 60).padStart(2, "0")}</td><td>${esc(e.type)}</td></tr>`).join("")}</tbody></table>` : `<p class="small muted">No activity events recorded.</p>`}
     <h3>Answers</h3>
-    ${s.auto.review.map(r => `<div class="q-ov">${reviewHTML([r])}<div class="small" style="margin:-.4rem 0 .8rem">Marks for this question:
-      <input type="number" step="0.25" min="0" max="${r.max}" class="ov" data-id="${esc(r.id)}" value="${r.marks}" style="width:6ch"> / ${r.max}
-      ${s.override?.[r.id] != null ? '<span class="pill blue">changed by you</span>' : ""}</div></div>`).join("")}
+    ${s.auto.review.map(r => { const man = r.manual; const val = man ? (s.override?.[r.id] ?? "") : r.marks;
+      return `<div class="q-ov">${reviewHTML([r])}<div class="small" style="margin:-.4rem 0 .8rem">${man ? "<b>✍️ Your mark for this program:</b>" : "Marks for this question:"}
+      <input type="number" step="0.25" min="0" max="${r.max}" class="ov" data-id="${esc(r.id)}" data-manual="${man ? 1 : ""}" value="${val}" placeholder="?" style="width:6ch"> / ${r.max}
+      ${man && r.hint ? `<span class="small muted">(the hint deduction is applied to your mark: final ${r.marks})</span>` : ""}
+      ${s.override?.[r.id] != null ? '<span class="pill blue">changed by you</span>' : man ? '<span class="pill bad">not marked yet</span>' : ""}</div></div>`; }).join("")}
     ${codeBlocks}</div>`;
   host.scrollIntoView({ behavior: "smooth" });
   host.querySelector("#d-close").onclick = () => { host.innerHTML = ""; };
@@ -569,6 +645,7 @@ function showDetail(host, t, s, refresh) {
     host.querySelectorAll(".ov").forEach(inp => {
       const r = s.auto.review.find(x => x.id === inp.dataset.id);
       const v = parseFloat(inp.value);
+      if (inp.dataset.manual) { if (!isNaN(v)) override[r.id] = Math.max(0, Math.min(r.max, v)); else delete override[r.id]; return; }
       if (!isNaN(v) && Math.abs(v - r.marks) > 1e-9) override[r.id] = Math.max(0, Math.min(r.max, v));
     });
     await updateSubmission(s.id, { adjust: parseFloat(host.querySelector("#d-adj").value) || 0, waivePenalty: host.querySelector("#d-waive").checked,
@@ -682,7 +759,8 @@ async function studentProfile(host, r) {
   for (const s of subs) {
     const t = tests.find(x => x.id === s.testId);
     const key = t ? await getKey(t.id) : null;
-    results.push({ s, t, g: t ? gradeSubmission(t, key, s) : null });
+    const s2 = t ? (await withHints(t, [s]))[0] : s;
+    results.push({ s: s2, t, g: t ? gradeSubmission(t, key, s2) : null });
   }
   host.innerHTML = `<div class="card"><div style="display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap">
       <h3 style="margin:0">👩‍🎓 ${esc(r.name)} <span class="small muted">${esc(r.email)}</span></h3><button class="small" id="p-close">Close</button></div>
