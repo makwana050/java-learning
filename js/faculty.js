@@ -350,8 +350,9 @@ export function splitTest(json) {
       if (!Array.isArray(q.options) || !Number.isInteger(q.answer) || q.answer < 0 || q.answer >= q.options.length) throw new Error(`${where}: mcq needs "options" and "answer" (0 = first option)`);
       p.options = q.options; keyQ[q.id] = { answer: q.answer };
     } else if (q.type === "output") {
-      if (q.answer == null) throw new Error(`${where}: output question needs "answer"`);
-      keyQ[q.id] = { answer: [].concat(q.answer) };
+      // a hand-marked written answer has no answer key: you mark it yourself in Submissions
+      if (q.answer == null && !q.manual) throw new Error(`${where}: output question needs "answer"`);
+      keyQ[q.id] = { answer: [].concat(q.answer ?? []) };
     } else if (q.type === "fill") {
       const n = (q.template || "").split("___").length - 1;
       if (!n || !Array.isArray(q.answer) || q.answer.length !== n) throw new Error(`${where}: fill needs a "template" with ___ blanks and one "answer" entry per blank (${n} found)`);
@@ -375,13 +376,13 @@ export function splitTest(json) {
         if (!(q.partial >= 0 && q.partial <= 1)) throw new Error(`${where}: "partial" must be between 0 and 1 (0.5 = half marks)`);
         keyQ[q.id].partial = +q.partial;
       }
-      if (q.hint) {   // the hint text itself goes only to the key (and the locked hint store), never into the public test
-        const pen = q.hintPenalty == null ? 30 : +q.hintPenalty;
-        if (!(pen >= 0 && pen <= 100)) throw new Error(`${where}: "hintPenalty" must be a percentage from 0 to 100`);
-        p.hasHint = true; p.hintPenalty = pen;
-        keyQ[q.id].hint = q.hint; keyQ[q.id].hintPenalty = pen;
-      }
     } else throw new Error(`${where}: "type" must be mcq, output, fill or code`);
+    if (q.hint) {   // the hint text itself goes only to the key (and the locked hint store), never into the public test
+      const pen = q.hintPenalty == null ? 30 : +q.hintPenalty;
+      if (!(pen >= 0 && pen <= 100)) throw new Error(`${where}: "hintPenalty" must be a percentage from 0 to 100`);
+      p.hasHint = true; p.hintPenalty = pen;
+      keyQ[q.id].hint = q.hint; keyQ[q.id].hintPenalty = pen;
+    }
     if (q.explain) keyQ[q.id].explain = q.explain;
     pubQ.push(p);
   });
@@ -408,9 +409,11 @@ function lineMatch(output, expected) {
 function gradeQuestion(q, k, a) {
   const m = q.marks || 1;
   if (q.manual) {
-    if (!a?.code) return { marks: 0, flag: "not attempted" };
+    // a written answer is plain text; a code question keeps its code and output
+    const written = typeof a === "string" ? a : a?.code;
+    if (!written || !written.trim()) return { marks: 0, flag: "not attempted" };
     let tip = "";
-    const code = codeOnly(a.code || "");
+    const code = codeOnly(a?.code || "");
     if (k?.rubric && code.replace(/\s+/g, "").length > 70) {
       const exps = [].concat(k.expected ?? []);
       const ran = a.status === "ok" || a.status === "runtime" || a.status === "timeout";
@@ -690,7 +693,7 @@ function showDetail(host, t, s, refresh) {
       ${s.events.map(e => `<tr><td class="num">${Math.floor(e.at / 60)}:${String(e.at % 60).padStart(2, "0")}</td><td>${esc(e.type)}</td></tr>`).join("")}</tbody></table>` : `<p class="small muted">No activity events recorded.</p>`}
     <h3>Answers</h3>
     ${s.auto.review.map(r => { const man = r.manual; const val = man ? (s.override?.[r.id] ?? "") : r.marks;
-      return `<div class="q-ov">${reviewHTML([r])}<div class="small" style="margin:-.4rem 0 .8rem">${man ? "<b>✍️ Your mark for this program:</b>" : "Marks for this question:"}
+      return `<div class="q-ov">${reviewHTML([r])}<div class="small" style="margin:-.4rem 0 .8rem">${man ? `<b>✍️ Your mark for this ${r.type === "code" ? "program" : "answer"}:</b>` : "Marks for this question:"}
       <input type="number" step="0.25" min="0" max="${r.max}" class="ov" data-id="${esc(r.id)}" data-manual="${man ? 1 : ""}" value="${val}" placeholder="?" style="width:6ch"> / ${r.max}
       ${man && r.hint ? `<span class="small muted">(the hint deduction is applied to your mark: final ${r.marks})</span>` : ""}
       ${s.override?.[r.id] != null ? '<span class="pill blue">changed by you</span>' : man ? '<span class="pill bad">not marked yet</span>' : ""}</div></div>`; }).join("")}

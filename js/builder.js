@@ -28,6 +28,7 @@ export function toEditable(pub, key) {
       if (q.type === "mcq") o.answer = k.answer ?? 0;
       if (q.type === "output") o.answer = k.answer || [""];
       if (q.type === "fill") o.answer = k.answer || [];
+      if (q.type !== "code" && k.hint) { o.hint = k.hint; o.hintPenalty = k.hintPenalty ?? 30; }
       if (q.type === "code") { o.expected = [].concat(k.expected ?? q.expected ?? "").join("\n--- OR ---\n"); o.partial = k.partial; o.mustUse = k.mustUse || q.mustUse || []; o.showExpected = q.expected != null; o.solution = k.solution || ""; o.hint = k.hint || ""; o.hintPenalty = k.hintPenalty ?? q.hintPenalty ?? 30; delete o.hasHint; }
       return o;
     }),
@@ -56,8 +57,8 @@ export function toJSON(t) {
         if (q.partial != null) o.partial = q.partial;
         if (q.mustUse?.length) o.mustUse = q.mustUse; if (q.showExpected === false) o.showExpected = false;
         if (q.solution) o.solution = q.solution;
-        if (q.hint && q.hint.trim()) { o.hint = q.hint; o.hintPenalty = q.hintPenalty == null ? 30 : +q.hintPenalty; }
       }
+      if (q.hint && q.hint.trim()) { o.hint = q.hint; o.hintPenalty = q.hintPenalty == null ? 30 : +q.hintPenalty; }
       return o;
     }),
   };

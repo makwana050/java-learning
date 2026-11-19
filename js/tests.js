@@ -249,7 +249,10 @@ function renderPaper(app, t, k, state) {
         card.appendChild(lab);
       });
     } else if (q.type === "output") {
-      card.insertAdjacentHTML("beforeend", `<div class="label">Your predicted output (one line per output line)</div><textarea rows="4" spellcheck="false" autocomplete="off" style="width:100%;font-family:var(--mono)">${esc(a || "")}</textarea>`);
+      // a hand-marked question is a written answer, so it gets a bigger box and normal text
+      card.insertAdjacentHTML("beforeend", q.manual
+        ? `<div class="label">Your answer</div><textarea rows="12" spellcheck="false" autocomplete="off" style="width:100%;line-height:1.5">${esc(a || "")}</textarea>`
+        : `<div class="label">Your predicted output (one line per output line)</div><textarea rows="4" spellcheck="false" autocomplete="off" style="width:100%;font-family:var(--mono)">${esc(a || "")}</textarea>`);
       card.querySelector("textarea").oninput = e => { state.answers[q.id] = e.target.value; save(); };
     } else if (q.type === "fill") {
       card.insertAdjacentHTML("beforeend", `<div class="label">Type the missing parts</div><div class="fill-code">${fillTemplateHTML(q.template, null, "t" + i)}</div>`);
@@ -268,42 +271,6 @@ function renderPaper(app, t, k, state) {
         <div class="btn-row"><button class="btn-run">▶ Run</button><span class="status run"></span></div>
         <div class="label">Output of your last run (this is what gets graded)</div><pre class="outbox out">${esc(a?.output || "(not run yet)")}</pre>`);
       createEditor(card.querySelector(".ed"), a?.code || q.starter || "public class Main {\n    public static void main(String[] args) {\n        \n    }\n}\n").then(ed => editors[q.id] = ed);
-      if (q.hasHint) {
-        const pen = q.hintPenalty ?? 30;
-        const hb = el(`<div class="hint-area" style="margin-top:.8rem"></div>`);
-        card.appendChild(hb);
-        const showHint = text => {
-          hb.innerHTML = `<div class="label">💡 Hint <span class="small muted">(−${pen}% of this question's marks)</span></div>`;
-          // a hint can hold one part per option, each starting with a line "// ===== Option A ..."
-          const parts = text.split(/^(?=\/\/ =+ Option [A-Z])/m).map(s => s.trim()).filter(Boolean);
-          parts.forEach(part => {
-            const name = (part.match(/^\/\/ =+ (Option [A-Z])/) || [])[1] || "";
-            hb.appendChild(textCanvas(part, { mono: true, width: w, size: 14, bg: "#fff8e1", pad: 12 }));
-            const put = el(`<button class="small" style="margin:.4rem 0 .8rem">Put the ${name ? name + " " : ""}hint code in my editor</button>`);
-            put.onclick = async () => {
-              const ed = editors[q.id]; if (!ed) return;
-              if (ed.getValue().trim() && !(await askBox("Replace the code in your editor with this hint code?", { ok: "Replace" }))) return;
-              ed.setValue(part.replace(/^\/\/ =+ Option [A-Z][^\n]*\n/, "")); log(`hint code put in editor (Q${i + 1}${name ? ", " + name : ""})`);
-            };
-            hb.appendChild(put);
-          });
-        };
-        if (state.hints?.[q.id] != null) showHint(state.hints[q.id]);
-        else {
-          const b = el(`<button class="small" style="border-color:#e0a800">💡 Show hint (−${pen}% marks for this question)</button>`);
-          b.onclick = async () => {
-            if (!(await askBox(`Show the hint for this question?\n\n${pen}% of this question's marks will be deducted, even if you don't use it. This can't be undone.`, { ok: "Show hint" }))) return;
-            b.disabled = true; b.textContent = "Loading hint…";
-            try {
-              const text = await takeHint(t.id, q.id);
-              state.hints = { ...(state.hints || {}), [q.id]: text };
-              log(`took the hint for question ${i + 1}`); save();
-              showHint(text);
-            } catch (e) { b.disabled = false; b.textContent = `💡 Show hint (−${pen}% marks for this question)`; toast("Could not load the hint: " + (e.code || e.message)); }
-          };
-          hb.appendChild(b);
-        }
-      }
       card.querySelector(".btn-run").onclick = async e => {
         const ed = editors[q.id]; if (!ed) return;
         const b = e.currentTarget; b.disabled = true;
@@ -315,6 +282,45 @@ function renderPaper(app, t, k, state) {
         save();
         card.querySelector(".out").textContent = r.output || "(no output)";
       };
+    }
+    // ---------- hint button (works for every kind of question) ----------
+    if (q.hasHint) {
+      const pen = q.hintPenalty ?? 30;
+      const isCode = q.type === "code";
+      const hb = el(`<div class="hint-area" style="margin-top:.8rem"></div>`);
+      card.appendChild(hb);
+      const showHint = text => {
+        hb.innerHTML = `<div class="label">💡 Hint <span class="small muted">(−${pen}% of this question's marks)</span></div>`;
+        // a hint can hold one part per option, each starting with a line "// ===== Option A ..."
+        const parts = text.split(/^(?=\/\/ =+ Option [A-Z])/m).map(s => s.trim()).filter(Boolean);
+        parts.forEach(part => {
+          const name = (part.match(/^\/\/ =+ (Option [A-Z])/) || [])[1] || "";
+          hb.appendChild(textCanvas(part, { mono: isCode, width: w, size: isCode ? 14 : 16, bg: "#fff8e1", pad: 12 }));
+          if (!isCode) return;   // only a code question has an editor to put the hint into
+          const put = el(`<button class="small" style="margin:.4rem 0 .8rem">Put the ${name ? name + " " : ""}hint code in my editor</button>`);
+          put.onclick = async () => {
+            const ed = editors[q.id]; if (!ed) return;
+            if (ed.getValue().trim() && !(await askBox("Replace the code in your editor with this hint code?", { ok: "Replace" }))) return;
+            ed.setValue(part.replace(/^\/\/ =+ Option [A-Z][^\n]*\n/, "")); log(`hint code put in editor (Q${i + 1}${name ? ", " + name : ""})`);
+          };
+          hb.appendChild(put);
+        });
+      };
+      if (state.hints?.[q.id] != null) showHint(state.hints[q.id]);
+      else {
+        const b = el(`<button class="small" style="border-color:#e0a800">💡 Show hint (−${pen}% marks for this question)</button>`);
+        b.onclick = async () => {
+          if (!(await askBox(`Show the hint for this question?\n\n${pen}% of this question's marks will be deducted, even if you don't use it. This can't be undone.`, { ok: "Show hint" }))) return;
+          b.disabled = true; b.textContent = "Loading hint…";
+          try {
+            const text = await takeHint(t.id, q.id);
+            state.hints = { ...(state.hints || {}), [q.id]: text };
+            log(`took the hint for question ${i + 1}`); save();
+            showHint(text);
+          } catch (e) { b.disabled = false; b.textContent = `💡 Show hint (−${pen}% marks for this question)`; toast("Could not load the hint: " + (e.code || e.message)); }
+        };
+        hb.appendChild(b);
+      }
     }
     return card;
   }
