@@ -83,6 +83,4 @@ Ids like `c1t3p2` must be unique and must **never change** once students have us
 - **Packages:** the Run button compiles one file, so creating packages is practised in the lab.
 - **Threads:** thread examples use `join()` so their output is predictable. One example deliberately shows a race condition, and its number changes from run to run.
 - **CheerpJ licence:** the in-browser Java engine is free for individuals and non-commercial projects with the "Built with CheerpJ" credit (it's in the footer). Since this is for a college course, a short email to CheerpJ (https://cheerpj.com/licensing/) to confirm is worthwhile.
-- **Free-plan limits:** Firebase's free plan gives 50,000 reads and 20,000 writes per day. That is plenty for 70 students, including the live monitor during a test.
-- **Another faculty account:** add the email in `js/config.js` **and** in `firestore.rules` (then Publish the rules).
-- **Another college domain:** change `ALLOWED_DOMAIN` in `js/config.js` **and** the `rru[.]ac[.]in` line in `firestore.rules`.
+
